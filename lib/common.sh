@@ -74,3 +74,26 @@ hc_json_event_count_since() {
 hc_register_check() {
     HC_REGISTERED_CHECKS+=("$1")
 }
+
+hc_mode() {
+    case "${1:-auto}" in
+        1) echo on ;;
+        0) echo off ;;
+        *) echo auto ;;
+    esac
+}
+
+hc_service_present() {
+    local unit="$1" bin
+    shift
+
+    if hc_have systemctl && systemctl cat "$unit" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    for bin in "$@"; do
+        hc_have "$bin" && return 0
+    done
+
+    return 1
+}

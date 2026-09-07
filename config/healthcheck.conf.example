@@ -5,16 +5,19 @@ LOOKBACK_HOURS=24
 # Notifications
 NOTIFY_TELEGRAM=1
 
+# CHECK_* below support: 1 (always check), 0 (never check), auto (only
+# check when the service is actually detected on this server).
+
 # Apache
-CHECK_APACHE=1
+CHECK_APACHE=auto
 APACHE_SERVICE=httpd
 
 # Rspamd
-CHECK_RSPAMD=1
+CHECK_RSPAMD=auto
 RSPAMD_SERVICE=rspamd
 
 # PureFTP upload scanner
-CHECK_PUREFTP=1
+CHECK_PUREFTP=auto
 PUREFTP_UPLOADSCAN_SERVICE=pure-uploadscript
 
 # Exim
