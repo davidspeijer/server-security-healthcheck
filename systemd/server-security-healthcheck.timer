@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Server Security Healthcheck
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

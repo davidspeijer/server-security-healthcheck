@@ -1,0 +1,47 @@
+# Server Security Healthcheck
+
+LOOKBACK_HOURS=24
+
+# Notifications
+NOTIFY_TELEGRAM=1
+
+# Apache
+CHECK_APACHE=1
+APACHE_SERVICE=httpd
+
+# Rspamd
+CHECK_RSPAMD=1
+RSPAMD_SERVICE=rspamd
+
+# PureFTP upload scanner
+CHECK_PUREFTP=1
+PUREFTP_UPLOADSCAN_SERVICE=pure-uploadscript
+
+# Exim
+CHECK_EXIM=1
+EXIM_SERVICE=exim
+MAILQUEUE_WARN=25
+
+# Disk
+CHECK_DISK=1
+DISK_WARN_PERCENT=80
+DISK_PATHS="/ /home /var /tmp"
+
+# ClamAV
+CHECK_CLAMAV=1
+CLAMAV_SERVICE=clamd@scan
+CLAM_SIG_MAX_AGE_HOURS=48
+
+# LMD
+CHECK_LMD=1
+LMD_SERVICE=maldet
+LMD_BIN=/usr/local/sbin/maldet
+LMD_DIR=/usr/local/maldetect
+LMD_AUDIT=/var/log/maldet/audit.log
+LMD_MONITOR_LIST=/usr/local/maldetect/directadmin-webroots
+LMD_SIG_MAX_AGE_HOURS=24
+FULLSCAN_MAX_AGE_DAYS=8
+
+# DirectAdmin layout used by the LMD webroot comparison
+CHECK_DIRECTADMIN_WEBROOTS=1
+DIRECTADMIN_HOME=/home

@@ -1,0 +1,10 @@
+[Unit]
+Description=Server Security Healthcheck
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-security-healthcheck
+User=root
+Group=root

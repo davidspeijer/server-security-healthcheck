@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+APP_NAME="server-security-healthcheck"
+CONFIG_DIR="${SSHC_CONFIG_DIR:-/etc/server-security-healthcheck}"
+LIB_DIR="${SSHC_LIB_DIR:-/usr/local/lib/server-security-healthcheck}"
+MAIN_CONFIG="${CONFIG_DIR}/healthcheck.conf"
+TELEGRAM_CONFIG="${CONFIG_DIR}/telegram.conf"
+CHECK_DIR="${LIB_DIR}/checks"
+NOTIFY_DIR="${LIB_DIR}/notify"
+
+[ -r "${LIB_DIR}/common.sh" ] || {
+    echo "ERROR missing ${LIB_DIR}/common.sh" >&2
+    exit 2
+}
+
+# shellcheck source=/dev/null
+source "${LIB_DIR}/common.sh"
+
+[ -r "$MAIN_CONFIG" ] || {
+    hc_log "ERROR missing config: $MAIN_CONFIG"
+    exit 2
+}
+# shellcheck source=/dev/null
+source "$MAIN_CONFIG"
+
+if [ -r "$TELEGRAM_CONFIG" ]; then
+    # shellcheck source=/dev/null
+    source "$TELEGRAM_CONFIG"
+fi
+
+HC_REGISTERED_CHECKS=()
+
+# Load notification backends.
+for module in "${NOTIFY_DIR}"/*.sh; do
+    [ -r "$module" ] || continue
+    # shellcheck source=/dev/null
+    source "$module"
+done
+
+# Load check modules.
+for module in "${CHECK_DIR}"/*.sh; do
+    [ -r "$module" ] || continue
+    # shellcheck source=/dev/null
+    source "$module"
+done
+
+case "${1:-}" in
+    --test-notification)
+        if declare -F notify_test >/dev/null 2>&1; then
+            notify_test
+            exit $?
+        fi
+        hc_log "ERROR no notification backend with notify_test found"
+        exit 2
+        ;;
+    --list-checks)
+        printf '%s\n' "${HC_REGISTERED_CHECKS[@]}"
+        exit 0
+        ;;
+    --help|-h)
+        cat <<'EOF'
+Usage:
+  server-security-healthcheck
+  server-security-healthcheck --test-notification
+  server-security-healthcheck --list-checks
+  server-security-healthcheck --help
+EOF
+        exit 0
+        ;;
+esac
+
+for check_name in "${HC_REGISTERED_CHECKS[@]}"; do
+    function_name="check_${check_name}"
+    if declare -F "$function_name" >/dev/null 2>&1; then
+        "$function_name"
+    else
+        hc_warn "Module '${check_name}' registered but function '${function_name}' is missing"
+    fi
+done
+
+if [ "${#HC_WARNINGS[@]}" -eq 0 ]; then
+    hc_log "OK all enabled checks passed"
+    exit 0
+fi
+
+host="$(hostname -f 2>/dev/null || hostname)"
+message="⚠️ Security healthcheck — ${host}
+$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+Problems found: ${#HC_WARNINGS[@]}
+
+"
+
+i=1
+for item in "${HC_WARNINGS[@]}"; do
+    message+="${i}. ${item}"$'\n'
+    i=$((i + 1))
+done
+
+if [ "${#HC_DETAILS[@]}" -gt 0 ]; then
+    message+=$'\n'"Context:"$'\n'
+    for item in "${HC_DETAILS[@]}"; do
+        message+="• ${item}"$'\n'
+    done
+fi
+
+if declare -F notify_telegram >/dev/null 2>&1; then
+    notify_telegram "$message" || {
+        printf '%s\n' "$message" >&2
+        exit 2
+    }
+else
+    printf '%s\n' "$message" >&2
+fi
+
+exit 1

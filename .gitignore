@@ -1,0 +1,8 @@
+telegram.conf
+*.secret
+.env
+*.log
+tmp/
+.vscode/
+.idea/
+.DS_Store
