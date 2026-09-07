@@ -1,5 +1,7 @@
 # Server Security Healthcheck
 
+Current development version: `v0.3.0`
+
 Standalone, modular security healthcheck for Linux servers.
 
 ## Design goals

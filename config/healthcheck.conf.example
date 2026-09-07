@@ -34,6 +34,10 @@ DISK_PATHS="/ /home /var /tmp"
 CHECK_CLAMAV=1
 CLAMAV_SERVICE=clamd@scan
 CLAM_SIG_MAX_AGE_HOURS=48
+FRESHCLAM_MAX_AGE_HOURS=36
+FRESHCLAM_SERVICE=clamav-freshclam.service
+FRESHCLAM_TIMER=clamav-freshclam-once.timer
+FRESHCLAM_ONESHOT_SERVICE=clamav-freshclam-once.service
 
 # LMD
 CHECK_LMD=1
@@ -42,7 +46,9 @@ LMD_BIN=/usr/local/sbin/maldet
 LMD_DIR=/usr/local/maldetect
 LMD_AUDIT=/var/log/maldet/audit.log
 LMD_MONITOR_LIST=/usr/local/maldetect/directadmin-webroots
-LMD_SIG_MAX_AGE_HOURS=24
+LMD_SIG_MAX_AGE_HOURS=72
+LMD_SIGUP_MAX_AGE_HOURS=8
+LMD_UPDATE_FAILURE_LOOKBACK_HOURS=48
 FULLSCAN_MAX_AGE_DAYS=8
 
 # DirectAdmin layout used by the LMD webroot comparison
