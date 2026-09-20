@@ -4,10 +4,13 @@ hc_register_check disk
 check_disk() {
     hc_enabled "${CHECK_DISK:-0}" || return 0
 
-    local fs size used avail percent mountpoint pct
+    local _fs _size _used avail percent mountpoint pct output
+    local -a paths
+    # Legacy DISK_PATHS is a whitespace-separated list, not shell syntax.
+    read -r -a paths <<< "${DISK_PATHS:-/ /home /var /tmp}"
+    output="$(df -P -h -- "${paths[@]}")" || { hc_status ERROR 'Disk usage check failed'; return; }
 
-    # shellcheck disable=SC2086
-    while read -r fs size used avail percent mountpoint; do
+    while read -r _fs _size _used avail percent mountpoint; do
         pct="${percent%\%}"
         [[ "$pct" =~ ^[0-9]+$ ]] || continue
 
@@ -15,7 +18,7 @@ check_disk() {
             hc_warn "Disk: ${mountpoint} is ${pct}% full (${avail} available)"
         fi
     done < <(
-        df -P -h ${DISK_PATHS:-"/ /home /var /tmp"} 2>/dev/null |
+        printf '%s\n' "$output" |
         awk 'NR>1' |
         sort -u -k6,6
     )

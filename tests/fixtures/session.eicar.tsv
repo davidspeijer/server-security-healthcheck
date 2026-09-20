@@ -1,0 +1,3 @@
+#LMD:v1	scan	260920-0030.1260922	host	/home/?/domains/?/public_html/	-	start	end	27692	0	915014	2	0	2.0.1	2026052490478	md5	clamav	0	-
+{HEX}test.test.eicar.1040	/home/example/domains/example.nl/public_html/eicar test.txt	-	HEX	test
+{HEX}TEST.TEST.EICAR.1040	/home/example/domains/example.nl/public_html/eicar.txt	-	HEX	test

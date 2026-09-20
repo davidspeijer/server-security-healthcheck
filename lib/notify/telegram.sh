@@ -15,9 +15,15 @@ notify_telegram() {
         return 1
     fi
 
+    # Telegram limits messages to 4096 characters. Keep bounded diagnostics in
+    # notifications; the CLI/journal retains full paths and per-hit details.
+    if [ "${#message}" -gt 3500 ]; then
+        message="${message:0:3500}"$'\n… Truncated; see the healthcheck CLI/systemd journal for full details.'
+    fi
+
     curl -fsS --max-time 20 \
         -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
         --data-urlencode "text=${message}" \
         >/dev/null
 }

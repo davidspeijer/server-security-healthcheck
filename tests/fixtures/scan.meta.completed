@@ -1,0 +1,21 @@
+#LMD_META:v1
+pid=1261106
+ns_pid=1260922
+ppid=1260919
+started=1789857035
+started_hr=Sep 20 2026 00:30:35 +0200
+path=/home/?/domains/?/public_html/
+total_files=915014
+workers=1
+engine=clamdscan
+hashtype=md5
+stages=clamav
+sig_version=2026052490478
+options=scan_clamscan=1,scan_yara=0,quarantine_hits=0
+quarantine_enabled=0
+state=running
+state=completed
+completed=1789884693
+completed_hr=Sep 20 2026 08:11:33 +0200
+elapsed=27692
+hits=0

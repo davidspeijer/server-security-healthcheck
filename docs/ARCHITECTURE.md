@@ -56,3 +56,24 @@ Checks are read-only.
 
 A future remediation system, if ever added, should be a separate program rather
 than mixing remediation with health monitoring.
+
+## v0.4.0 execution and safety
+
+Configuration is parsed as literal assignments with allowed names, typed numeric
+values and validated policy enums; it is no longer sourced as shell code.
+`hc_require_dependencies` checks the generic commands and GNU date. Integration
+modules check their own requirements after checking enablement/availability.
+
+`hc_status PASS|INFO|WARNING|CRITICAL|ERROR` emits immediate CLI diagnostics.
+WARNING/CRITICAL add notification findings; ERROR increments `HC_ERRORS` and causes
+exit 2. `hc_warn` remains a compatibility helper for WARNING; `hc_detail` emits INFO
+and adds notification context. INFO/PASS never change the exit status. Modules
+must report execution errors explicitly rather than relying on their final shell
+command's return code; no global `set -e` is introduced.
+
+LMD session metadata and logs are read as data. No `maldet` process is invoked.
+See [LMD parsing](LMD-PARSING.md) for data formats and selection assumptions.
+Coverage uses private scratch files; cleanup is restricted to those files.
+Telegram truncates large summaries while local output retains full diagnostics.
+Installation/removal scripts perform their explicit administrative tasks outside
+the read-only check contract and preserve existing user configuration.

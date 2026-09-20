@@ -27,7 +27,13 @@ _clamav_last_success_epoch() {
 }
 
 check_clamav() {
-    hc_enabled "${CHECK_CLAMAV:-0}" || return 0
+    local mode dependency
+    mode="$(hc_mode "${CHECK_CLAMAV:-0}")"
+    [ "$mode" = off ] && return 0
+    if [ "$mode" = auto ] && ! hc_service_present "${CLAMAV_SERVICE:-clamd@scan}" clamd freshclam; then return 0; fi
+    for dependency in systemctl journalctl; do
+        hc_have "$dependency" || { hc_status ERROR "ClamAV dependency missing: $dependency"; return; }
+    done
 
     hc_check_service "${CLAMAV_SERVICE:-clamd@scan}" "ClamAV" || true
 
@@ -39,7 +45,9 @@ check_clamav() {
     else
         sig_age="$(hc_file_age_hours "$sig_file" || echo -1)"
         hc_detail "ClamAV official database age: ${sig_age}h"
-        if [ "$sig_age" -gt "${CLAM_SIG_MAX_AGE_HOURS:-48}" ]; then
+        if [ "$sig_age" -lt 0 ]; then
+            hc_warn 'ClamAV database timestamp unavailable or in the future'
+        elif [ "$sig_age" -gt "${CLAM_SIG_MAX_AGE_HOURS:-48}" ]; then
             hc_warn "ClamAV official signatures are ${sig_age}h old (threshold ${CLAM_SIG_MAX_AGE_HOURS:-48}h)"
         fi
     fi
@@ -51,16 +59,25 @@ check_clamav() {
         return
     fi
 
-    if systemctl list-unit-files "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}" --no-legend 2>/dev/null | grep -q .; then
+    if systemctl cat "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}" >/dev/null 2>&1; then
         if systemctl is-enabled --quiet "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}" 2>/dev/null; then
-            updater_detected=1
-            hc_detail "FreshClam timer: enabled"
+            if hc_service_active "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}"; then
+                updater_detected=1
+                hc_detail "FreshClam timer: enabled and active"
+                if ! systemctl cat "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" >/dev/null 2>&1; then
+                    hc_warn 'FreshClam timer: associated oneshot service missing'
+                elif systemctl is-failed --quiet "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}"; then
+                    hc_warn 'FreshClam timer: associated oneshot service failed'
+                fi
+            else
+                hc_warn 'FreshClam timer is enabled but not active'
+            fi
         else
             hc_warn "FreshClam timer exists but is not enabled"
         fi
     fi
 
-    if systemctl list-unit-files "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" --no-legend 2>/dev/null | grep -q .; then
+    if systemctl cat "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" >/dev/null 2>&1; then
         if systemctl is-enabled --quiet "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" 2>/dev/null; then
             updater_detected=1
             if systemctl is-active --quiet "${FRESHCLAM_SERVICE:-clamav-freshclam.service}"; then
@@ -84,4 +101,5 @@ check_clamav() {
     else
         hc_warn "FreshClam: no successful update/check found in recent journal"
     fi
+    return 0
 }

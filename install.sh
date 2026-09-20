@@ -12,6 +12,12 @@ install -d -m 0755 /usr/local/lib/server-security-healthcheck/checks
 install -d -m 0755 /usr/local/lib/server-security-healthcheck/notify
 install -d -m 0755 /etc/server-security-healthcheck
 
+# Refresh shipped examples on every upgrade, never the user's active files.
+install -m 0644 "$ROOT_DIR/config/healthcheck.conf.example" \
+    /etc/server-security-healthcheck/healthcheck.conf.example
+install -m 0600 "$ROOT_DIR/config/telegram.conf.example" \
+    /etc/server-security-healthcheck/telegram.conf.example
+
 install -m 0755 "$ROOT_DIR/bin/server-security-healthcheck" \
     /usr/local/sbin/server-security-healthcheck
 install -m 0644 "$ROOT_DIR/lib/common.sh" \
@@ -27,12 +33,12 @@ for f in "$ROOT_DIR"/lib/notify/*.sh; do
         "/usr/local/lib/server-security-healthcheck/notify/$(basename "$f")"
 done
 
-if [ ! -f /etc/server-security-healthcheck/healthcheck.conf ]; then
+if [ ! -e /etc/server-security-healthcheck/healthcheck.conf ] && [ ! -L /etc/server-security-healthcheck/healthcheck.conf ]; then
     install -m 0644 "$ROOT_DIR/config/healthcheck.conf.example" \
         /etc/server-security-healthcheck/healthcheck.conf
 fi
 
-if [ ! -f /etc/server-security-healthcheck/telegram.conf ]; then
+if [ ! -e /etc/server-security-healthcheck/telegram.conf ] && [ ! -L /etc/server-security-healthcheck/telegram.conf ]; then
     install -m 0600 "$ROOT_DIR/config/telegram.conf.example" \
         /etc/server-security-healthcheck/telegram.conf
 fi

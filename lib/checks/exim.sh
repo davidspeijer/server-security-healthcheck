@@ -2,7 +2,10 @@
 hc_register_check exim
 
 check_exim() {
-    hc_enabled "${CHECK_EXIM:-0}" || return 0
+    local mode
+    mode="$(hc_mode "${CHECK_EXIM:-0}")"
+    [ "$mode" = off ] && return 0
+    if [ "$mode" = auto ] && ! hc_service_present "${EXIM_SERVICE:-exim}" exim; then return 0; fi
 
     hc_check_service "${EXIM_SERVICE:-exim}" "Exim" || true
 

@@ -68,3 +68,20 @@ check_mariadb() {
 exists for it, or if any of the given fallback binaries are on `PATH`. This
 avoids false warnings when an alternative (e.g. LiteSpeed instead of Apache,
 ProFTPd instead of Pure-FTPd) is installed instead.
+
+## Status and configuration contract (v0.4.0)
+
+Use `hc_status PASS "..."` for a verified success, `hc_detail "..."` for INFO,
+`hc_warn "..."` for WARNING, `hc_status CRITICAL "..."` for urgent health findings,
+and `hc_status ERROR "..."` when execution is unreliable. Both WARNING and CRITICAL
+produce exit 1; ERROR produces exit 2. Do not hide failed discovery/commands behind
+empty healthy results. Explicitly check optional dependencies only for enabled,
+available integrations. End successful module execution with `return 0` where its
+last expression otherwise returns a health condition.
+
+When adding a setting, extend `hc_load_config`'s allowed-name list and validation,
+provide a code default, update the example and document it. Configuration is data,
+not sourced shell code. Never use eval, source external product configuration or
+execute command text from a setting. Preserve existing aliases where appropriate.
+Add regression fixtures for parsing and meaningful behavior tests in
+`tests/test_healthcheck.py`.

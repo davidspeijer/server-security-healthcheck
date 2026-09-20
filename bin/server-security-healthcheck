@@ -3,6 +3,15 @@ set -u
 set -o pipefail
 
 APP_NAME="server-security-healthcheck"
+APP_VERSION="0.4.0"
+if [ "${1:-}" = --version ]; then
+    printf '%s v%s\n' "$APP_NAME" "$APP_VERSION"
+    exit 0
+fi
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo 'ERROR Bash 4 or newer is required' >&2
+    exit 2
+fi
 CONFIG_DIR="${SSHC_CONFIG_DIR:-/etc/server-security-healthcheck}"
 LIB_DIR="${SSHC_LIB_DIR:-/usr/local/lib/server-security-healthcheck}"
 MAIN_CONFIG="${CONFIG_DIR}/healthcheck.conf"
@@ -22,12 +31,11 @@ source "${LIB_DIR}/common.sh"
     hc_log "ERROR missing config: $MAIN_CONFIG"
     exit 2
 }
-# shellcheck source=/dev/null
-source "$MAIN_CONFIG"
+hc_require_dependencies || exit 2
+hc_load_config "$MAIN_CONFIG" || exit 2
 
 if [ -r "$TELEGRAM_CONFIG" ]; then
-    # shellcheck source=/dev/null
-    source "$TELEGRAM_CONFIG"
+    hc_load_config "$TELEGRAM_CONFIG" || exit 2
 fi
 
 HC_REGISTERED_CHECKS=()
@@ -66,9 +74,12 @@ Usage:
   server-security-healthcheck --test-notification
   server-security-healthcheck --list-checks
   server-security-healthcheck --help
+  server-security-healthcheck --version
 EOF
         exit 0
         ;;
+    '') ;;
+    *) hc_status ERROR "Unknown argument: $1"; exit 2 ;;
 esac
 
 for check_name in "${HC_REGISTERED_CHECKS[@]}"; do
@@ -76,11 +87,12 @@ for check_name in "${HC_REGISTERED_CHECKS[@]}"; do
     if declare -F "$function_name" >/dev/null 2>&1; then
         "$function_name"
     else
-        hc_warn "Module '${check_name}' registered but function '${function_name}' is missing"
+        hc_status ERROR "Module '${check_name}' registered but function '${function_name}' is missing"
     fi
 done
 
 if [ "${#HC_WARNINGS[@]}" -eq 0 ]; then
+    [ "$HC_ERRORS" -eq 0 ] || exit 2
     hc_log "OK all enabled checks passed"
     exit 0
 fi
@@ -90,6 +102,7 @@ message="⚠️ Security healthcheck — ${host}
 $(date '+%Y-%m-%d %H:%M:%S %Z')
 
 Problems found: ${#HC_WARNINGS[@]}
+Execution errors: ${HC_ERRORS}
 
 "
 
@@ -115,4 +128,7 @@ else
     printf '%s\n' "$message" >&2
 fi
 
+# Preserve findings notifications even if another check could not execute.
+# The execution error still takes precedence in the final exit status.
+[ "$HC_ERRORS" -eq 0 ] || exit 2
 exit 1
