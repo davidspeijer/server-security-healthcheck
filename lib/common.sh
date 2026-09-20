@@ -55,7 +55,15 @@ hc_load_config() {
             FULLSCAN_MAX_AGE_DAYS|CHECK_DIRECTADMIN_WEBROOTS|DIRECTADMIN_HOME|LMD_MONITOR_REQUIRED|\
             LMD_MONITOR_MAX_IDLE_MINUTES|LMD_MONITOR_PROCESS_PATTERN|LMD_EVENT_LOG|LMD_SESSION_DIR|\
             LMD_FULLSCAN_MAX_AGE_HOURS|LMD_FULLSCAN_MAX_RUNTIME_HOURS|LMD_EXPECTED_FULLSCAN_PATH|\
-            LMD_PROGRAM_UPDATE_EXPECTED|LMD_EXPECT_QUARANTINE_ENABLED) ;;
+            LMD_PROGRAM_UPDATE_EXPECTED|LMD_EXPECT_QUARANTINE_ENABLED|\
+            LMD_CONFIG_CHECK_ENABLED|LMD_CONFIG_FILE|LMD_CRON_CONFIG_FILE|LMD_COMPAT_CONFIG_FILE|\
+            LMD_SYSCONFIG_FILE|LMD_DEFAULT_FILE|LMD_DAILY_CRON_FILE|LMD_SIGUP_CRON_FILE|LMD_FULLSCAN_CRON_FILE|\
+            LMD_EXPECT_EMAIL_ALERT|LMD_EXPECT_AUTOUPDATE_SIGNATURES|LMD_EXPECT_SIGUP_INTERVAL|\
+            LMD_EXPECT_AUTOUPDATE_VERSION|LMD_EXPECT_CRON_AUTOUPDATE_VERSION|LMD_EXPECT_CRON_AUTOUPDATE_SIGNATURES|\
+            LMD_EXPECT_SCAN_CLAMSCAN|LMD_EXPECT_SCAN_WORKERS|LMD_EXPECT_QUARANTINE_CLEAN|\
+            LMD_EXPECT_QUARANTINE_SUSPEND_USER|LMD_EXPECT_QUARANTINE_ON_ERROR|LMD_EXPECT_MONITOR_MODE|\
+            LMD_EXPECT_INOTIFY_SLEEP|LMD_EXPECT_INOTIFY_RELOADTIME|LMD_EXPECT_IMPORT_CONFIG_URL|\
+            LMD_EXPECT_POST_SCAN_HOOK|LMD_EXPECT_CRON_PRUNE_DAYS|LMD_EXPECT_SIGUP_SCHEDULE|LMD_EXPECT_FULLSCAN_SCHEDULE) ;;
             *) hc_status ERROR "$file:$number: unknown configuration key $key"; return 1 ;;
         esac
         if [[ "$value" = \"* || "$value" = \'* ]]; then
@@ -74,12 +82,22 @@ hc_load_config() {
             hc_status ERROR "$file:$number: shell expressions are not supported"; return 1;
         }
         case "$key" in
+            LMD_EXPECT_SCAN_WORKERS|LMD_EXPECT_CRON_PRUNE_DAYS) ;; # informational preferences, not enforced
+            LMD_EXPECT_EMAIL_ALERT|LMD_EXPECT_AUTOUPDATE_SIGNATURES|LMD_EXPECT_AUTOUPDATE_VERSION|\
+            LMD_EXPECT_CRON_AUTOUPDATE_VERSION|LMD_EXPECT_CRON_AUTOUPDATE_SIGNATURES|LMD_EXPECT_QUARANTINE_ENABLED|\
+            LMD_EXPECT_QUARANTINE_CLEAN|LMD_EXPECT_QUARANTINE_SUSPEND_USER|LMD_EXPECT_QUARANTINE_ON_ERROR)
+                [[ "$value" =~ ^(0|1|ignore)$ ]] || { hc_status ERROR "Invalid $key"; return 1; } ;;
+            LMD_EXPECT_SCAN_CLAMSCAN)
+                [[ "$value" =~ ^(0|1|auto|ignore)$ ]] || { hc_status ERROR "Invalid $key"; return 1; } ;;
+            LMD_EXPECT_SIGUP_INTERVAL|LMD_EXPECT_INOTIFY_SLEEP|LMD_EXPECT_INOTIFY_RELOADTIME)
+                if [ "$value" != ignore ]; then
+                    hc_uint "$value" && [ "$value" -gt 0 ] || { hc_status ERROR "$key must be positive or ignore"; return 1; }
+                fi ;;
             *_HOURS|*_MINUTES|*_DAYS|MAILQUEUE_WARN|DISK_WARN_PERCENT)
                 hc_uint "$value" && [ "$value" -gt 0 ] || { hc_status ERROR "$key must be a positive decimal integer"; return 1; } ;;
-            NOTIFY_TELEGRAM|LMD_MONITOR_REQUIRED|CHECK_DISK|CHECK_DIRECTADMIN_WEBROOTS) [[ "$value" =~ ^[01]$ ]] || { hc_status ERROR "$key must be 0 or 1"; return 1; } ;;
+            NOTIFY_TELEGRAM|LMD_MONITOR_REQUIRED|CHECK_DISK|CHECK_DIRECTADMIN_WEBROOTS|LMD_CONFIG_CHECK_ENABLED) [[ "$value" =~ ^[01]$ ]] || { hc_status ERROR "$key must be 0 or 1"; return 1; } ;;
             CHECK_*|LMD_ENABLED) [[ "$value" =~ ^(0|1|auto)$ ]] || { hc_status ERROR "$key must be 0, 1 or auto"; return 1; } ;;
             LMD_PROGRAM_UPDATE_EXPECTED) [[ "$value" =~ ^(enabled|disabled|ignore)$ ]] || { hc_status ERROR "Invalid $key"; return 1; } ;;
-            LMD_EXPECT_QUARANTINE_ENABLED) [[ "$value" =~ ^(0|1|ignore)$ ]] || { hc_status ERROR "Invalid $key"; return 1; } ;;
         esac
         printf -v "$key" '%s' "$value"
     done < "$file"

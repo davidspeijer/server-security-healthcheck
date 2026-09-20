@@ -76,7 +76,52 @@ reported as stale/out-of-scope even if the path still physically exists.
 
 ## Configuration policy
 
-Program-update expectation is deliberately independent of `conf.maldet`/cron:
-no LMD config is evaluated, no secrets are read and disabled policy is labelled as
-intentional rather than independently verified. Quarantine policy is per-scan
-metadata, so it may differ from today's live LMD configuration. Neither is modified.
+`lib/checks/lmd_policy.sh` supplies helpers to the registered LMD module; it does
+not register another check. The existing installer discovers and installs it.
+The module reads selected protection/update/monitor settings as literal data,
+without sourcing any external config or executing its contents. The application's
+own notification credentials are not taken from LMD. Live policy and historical
+scan metadata are separate observations; neither is modified.
+
+`_lmd_config_get` distinguishes missing (1), unsupported/dynamic (2), unreadable
+(3), and literal values (0, including empty). It supports comments, whitespace,
+CRLF, optional `export`, quoted strings and duplicate unconditional assignments
+(last wins). It rejects shell expansion/escape sequences in selected values and
+non-assignment statements in config files. It is intentionally not a full shell
+configuration interpreter. Unrelated assignments are not extracted or printed.
+
+Selected protection settings are compared in the base and any present overlays.
+The default daily source precedence is base, compatibility overlay, sysconfig (or
+its default-file fallback), then cron override. Missing cron switches inherit the
+preceding value for effective-value calculation, but the separate expected explicit
+override check still warns. For monitor mode, the inspected stock systemd layout
+loads both environment files in order; an empty argument uses the base/runtime
+`default_monitor_mode`, not the daily-only override.
+
+The daily recognizer checks supported path bindings, source order/file guards and
+directly guarded `maldet -d/-u` calls. It accepts the stock upstream update section,
+not arbitrary equivalent scripts. Changes produce UNKNOWN rather than assuming
+the named override file is actually used. Daily custom commands and applicable DTC
+imports need review. This is bounded structural inspection, not a security proof
+about arbitrary executable shell code or the scheduler's live state.
+
+Cron definitions require exactly one active root job per configured cron.d file.
+Five normalized schedule fields are compared to expectations. The tokenizer keeps
+quoted spaces but does no shell expansion. It recognizes the supplied independent
+`--cron-sigup` command and the `flock -n ... maldet -b -a TARGET` scan wrapper, plus
+simple redirects. Other wrappers, additional arguments, environment directives,
+percent expansion or absent final newlines warn. The scan's background launch does
+not count as completion. No crontab is installed, changed or executed.
+
+The supplied production configuration and cron commands are regression fixtures.
+The source/guard and monitor precedence assumptions were additionally checked
+against the upstream layouts:
+
+- [daily script](https://github.com/rfxn/linux-malware-detect/blob/master/cron.daily)
+- [path bindings](https://github.com/rfxn/linux-malware-detect/blob/master/files/internals/internals.conf)
+- [systemd unit](https://github.com/rfxn/linux-malware-detect/blob/master/files/service/maldet.service)
+- [signature schedule](https://github.com/rfxn/linux-malware-detect/blob/master/cron.d.sigup)
+
+These references are not runtime dependencies. Location overrides select the files
+being inspected; keep them aligned with the actual installation. Unsupported
+packaging/layouts need a separate recognizer before claiming effective behavior.

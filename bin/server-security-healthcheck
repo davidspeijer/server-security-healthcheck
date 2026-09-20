@@ -3,7 +3,7 @@ set -u
 set -o pipefail
 
 APP_NAME="server-security-healthcheck"
-APP_VERSION="0.4.0"
+APP_VERSION="0.5.0"
 if [ "${1:-}" = --version ]; then
     printf '%s v%s\n' "$APP_NAME" "$APP_VERSION"
     exit 0
@@ -107,9 +107,15 @@ Execution errors: ${HC_ERRORS}
 "
 
 i=1
-for item in "${HC_WARNINGS[@]}"; do
-    message+="${i}. ${item}"$'\n'
-    i=$((i + 1))
+# A burst of policy warnings must not push critical scan findings beyond the
+# notification length limit. CLI output remains in check execution order.
+for severity in CRITICAL WARNING; do
+    for item in "${HC_WARNINGS[@]}"; do
+        if [ "$severity" = CRITICAL ] && [[ "$item" != 'CRITICAL '* ]]; then continue; fi
+        if [ "$severity" = WARNING ] && [[ "$item" = 'CRITICAL '* ]]; then continue; fi
+        message+="${i}. ${item}"$'\n'
+        i=$((i + 1))
+    done
 done
 
 if [ "${#HC_DETAILS[@]}" -gt 0 ]; then

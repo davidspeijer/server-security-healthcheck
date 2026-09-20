@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Static test input only. The healthcheck must never execute this fixture.
+inspath='/usr/local/maldetect'
+intcnf="$inspath/internals/internals.conf"
+if [ -f "$intcnf" ]; then
+    . $intcnf
+fi
+if [ -f "$cnf" ]; then
+    . $cnf
+    if [ -f "$compatcnf" ]; then
+        . $compatcnf
+    fi
+fi
+if [ -f "/etc/sysconfig/maldet" ]; then
+    . /etc/sysconfig/maldet
+elif [ -f "/etc/default/maldet" ]; then
+    . /etc/default/maldet
+fi
+if [ -f "$cron_custom_conf" ]; then
+    . $cron_custom_conf
+fi
+if [ "$autoupdate_version" == "1" ]; then
+    $inspath/maldet -d 1 2>&1 | tail -20 >> "$maldet_log"
+fi
+if [ "$autoupdate_signatures" == "1" ]; then
+    $inspath/maldet -u 1 2>&1 | tail -20 >> "$maldet_log"
+fi

@@ -72,11 +72,65 @@ LMD_EXPECTED_FULLSCAN_PATH="/home/?/domains/?/public_html/"
 
 # enabled | disabled | ignore. This declares policy, it does not change LMD.
 LMD_PROGRAM_UPDATE_EXPECTED=disabled
-# 0 | 1 | ignore. Disabled quarantine alone is informational.
-LMD_EXPECT_QUARANTINE_ENABLED=0
+# 0 | 1 | ignore. This example expects LMD to quarantine malware hits.
+# Intended LMD policy (configure separately in LMD, not in this file):
+# quarantine_hits=1, quarantine_clean=0, quarantine_suspend_user=0,
+# quarantine_on_error=0: scanner errors alone should not trigger quarantine.
+# The policy check also compares the live configuration; scan metadata remains
+# a separate view of the policy used by that particular scan.
+# If this key is absent, the legacy default remains 0 for compatibility.
+LMD_EXPECT_QUARANTINE_ENABLED=1
 
 # Optional DirectAdmin layout comparison; enable explicitly on those servers.
 CHECK_DIRECTADMIN_WEBROOTS=0
 DIRECTADMIN_HOME=/home
 # Legacy LMD_MONITOR_LIST is used when LMD_WEBROOT_LIST is absent.
 LMD_WEBROOT_LIST=/usr/local/maldetect/directadmin-webroots
+
+# -------------------------------------------------------------------
+# LMD - Expected configuration and scheduling
+# -------------------------------------------------------------------
+# Read-only, enabled by default when the LMD integration runs.
+# 0 skips configuration/cron validation; operational checks still run.
+LMD_CONFIG_CHECK_ENABLED=1
+
+# Location overrides; omitted paths derive from LMD_DIR or use the paths below.
+# LMD_CONFIG_FILE=/usr/local/maldetect/conf.maldet
+# LMD_CRON_CONFIG_FILE=/usr/local/maldetect/cron/conf.maldet.cron
+# LMD_COMPAT_CONFIG_FILE=/usr/local/maldetect/internals/compat.conf
+# LMD_SYSCONFIG_FILE=/etc/sysconfig/maldet
+# LMD_DEFAULT_FILE=/etc/default/maldet
+# LMD_DAILY_CRON_FILE=/etc/cron.daily/maldet
+# LMD_SIGUP_CRON_FILE=/etc/cron.d/maldet-sigup
+# LMD_FULLSCAN_CRON_FILE=/etc/cron.d/maldet-fullscan
+
+# Policy mismatches are WARNING. Most expectations also accept "ignore".
+LMD_EXPECT_EMAIL_ALERT=1
+LMD_EXPECT_AUTOUPDATE_SIGNATURES=1
+LMD_EXPECT_SIGUP_INTERVAL=6
+# Base permits updates; the daily context intentionally overrides both to 0.
+LMD_EXPECT_AUTOUPDATE_VERSION=1
+LMD_EXPECT_CRON_AUTOUPDATE_VERSION=0
+LMD_EXPECT_CRON_AUTOUPDATE_SIGNATURES=0
+LMD_EXPECT_SCAN_CLAMSCAN=auto
+# LMD_EXPECT_QUARANTINE_ENABLED is defined in the LMD section above.
+LMD_EXPECT_QUARANTINE_CLEAN=0
+LMD_EXPECT_QUARANTINE_SUSPEND_USER=0
+LMD_EXPECT_QUARANTINE_ON_ERROR=0
+LMD_EXPECT_MONITOR_MODE=/usr/local/maldetect/directadmin-webroots
+LMD_EXPECT_INOTIFY_SLEEP=15
+LMD_EXPECT_INOTIFY_RELOADTIME=3600
+# Empty means MUST be empty; missing or dynamic values are not assumed empty.
+LMD_EXPECT_IMPORT_CONFIG_URL=""
+LMD_EXPECT_POST_SCAN_HOOK=""
+
+# Preferences only: differences in tuning do not produce warnings.
+LMD_EXPECT_SCAN_WORKERS=auto
+LMD_EXPECT_CRON_PRUNE_DAYS=21
+# scan_hashtype, email_addr and email_subj are informational, not enforced.
+# Email recipient/subject values are not included in diagnostics.
+
+# Optional exact cron schedule expectations (five fields, normalized whitespace).
+# Signature schedule otherwise derives from LMD_EXPECT_SIGUP_INTERVAL.
+# LMD_EXPECT_SIGUP_SCHEDULE="0 */6 * * *"
+LMD_EXPECT_FULLSCAN_SCHEDULE="30 0 * * 0"

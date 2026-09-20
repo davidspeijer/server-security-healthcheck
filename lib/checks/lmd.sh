@@ -359,6 +359,7 @@ check_lmd() {
         [ "$mode" = auto ] || hc_warn 'LMD integration enabled but installation directory is unavailable'
         return
     fi
+    _lmd_check_configuration
     hc_have rmdir || { hc_status ERROR 'LMD dependency missing: rmdir'; return; }
     if hc_enabled "${LMD_MONITOR_REQUIRED:-1}"; then
         for dependency in systemctl pgrep; do

@@ -42,6 +42,7 @@ class HealthcheckTests(unittest.TestCase):
 source {Q(str(ROOT / 'lib/common.sh'))}
 HC_REGISTERED_CHECKS=()
 source {Q(str(ROOT / 'lib/checks/lmd.sh'))}
+source {Q(str(ROOT / 'lib/checks/lmd_policy.sh'))}
 source {Q(str(ROOT / 'lib/checks/clamav.sh'))}
 LMD_DIR={Q(str(self.lmd))}
 LMD_AUDIT={Q(str(self.work / 'absent audit'))}
@@ -403,7 +404,7 @@ CHECK_LMD=0
     def test_version(self):
         result = self.main('', ['--version'])
         self.assertEqual(result.returncode, 0)
-        self.assertIn('v0.4.0', result.stdout)
+        self.assertIn('v0.5.0', result.stdout)
 
     def test_unknown_argument(self):
         self.assertEqual(self.main('', ['--unknown']).returncode, 2)
@@ -558,6 +559,272 @@ notify_telegram "$long"
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertTrue(marker.exists(), 'A separate check error suppressed the malware notification')
         self.assertIn('CRITICAL LMD full scan found malware', marker.read_text())
+
+    def policy_setup(self):
+        (self.lmd / 'cron').mkdir(exist_ok=True)
+        (self.lmd / 'internals').mkdir(exist_ok=True)
+        shutil.copyfile(FIXTURES / 'conf.maldet', self.lmd / 'conf.maldet')
+        shutil.copyfile(FIXTURES / 'conf.maldet.cron', self.lmd / 'cron/conf.maldet.cron')
+        shutil.copyfile(FIXTURES / 'lmd-internals.conf', self.lmd / 'internals/internals.conf')
+        self.policy_daily = self.work / 'maldet.daily'
+        self.policy_daily.write_text((FIXTURES / 'maldet.daily').read_text().replace('/usr/local/maldetect', str(self.lmd)))
+        self.policy_daily.chmod(0o700)
+        self.policy_sysconfig = self.work / 'sysconfig'
+        self.policy_sysconfig.write_text(f'MONITOR_MODE="{self.lmd}/directadmin-webroots"\n')
+        self.policy_default = self.work / 'default'
+        self.policy_sigup = self.work / 'maldet-sigup'
+        self.policy_sigup.write_text(f'0 */6 * * * root "{self.lmd}/maldet" --cron-sigup >> /dev/null 2>&1\n')
+        self.policy_scan = self.work / 'maldet-fullscan'
+        self.policy_scan.write_text(f"30 0 * * 0 root /usr/bin/flock -n /var/run/maldet-fullscan.lock '{self.lmd}/maldet' -b -a '/home/?/domains/?/public_html/' >> /var/log/maldet/fullscan-cron.log 2>&1\n")
+        self.policy_unit = self.work / 'maldet.service'
+        self.policy_unit.write_text('[Service]\nEnvironmentFile=-/etc/sysconfig/maldet\nEnvironmentFile=-/etc/default/maldet\n'
+                                    f'ExecStart={self.lmd}/maldet --monitor ${{MONITOR_MODE}}\n')
+        self.policy_prefix = f'''
+LMD_EXPECT_QUARANTINE_ENABLED=1
+LMD_SYSCONFIG_FILE={Q(str(self.policy_sysconfig))}
+LMD_DEFAULT_FILE={Q(str(self.policy_default))}
+LMD_DAILY_CRON_FILE={Q(str(self.policy_daily))}
+LMD_SIGUP_CRON_FILE={Q(str(self.policy_sigup))}
+LMD_FULLSCAN_CRON_FILE={Q(str(self.policy_scan))}
+systemctl() {{ if [ "$1" = cat ]; then command cat {Q(str(self.policy_unit))}; else return 0; fi; }}
+'''
+
+    def policy(self, extra=''):
+        return self.run_shell(self.policy_prefix + extra + '\n_lmd_check_configuration')
+
+    def test_production_configuration_and_split_cron_policy(self):
+        self.policy_setup()
+        output = self.policy()
+        self.assertNotIn('WARNING', output)
+        self.assertNotIn('ERROR', output)
+        self.assertIn('daily autoupdate_version intentionally disabled', output)
+        self.assertIn('daily autoupdate_signatures intentionally disabled', output)
+        self.assertIn('PASS LMD sigup cron definition matches', output)
+        self.assertIn('PASS LMD fullscan cron definition matches', output)
+        self.assertIn('PASS LMD effective MONITOR_MODE matches', output)
+
+    def test_live_quarantine_on_error_drift(self):
+        self.policy_setup()
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write('quarantine_on_error="1"\n')
+        self.assertIn('WARNING LMD base configuration: quarantine_on_error differs', self.policy())
+
+    def test_empty_policy_values_are_not_missing(self):
+        self.policy_setup()
+        output = self.policy()
+        self.assertIn('import_config_url matches', output)
+        file = self.lmd / 'conf.maldet'
+        file.write_text(file.read_text().replace('import_config_url=""\n', ''))
+        self.assertIn('import_config_url missing', self.policy())
+
+    def test_unexpected_import_and_hook_redacted(self):
+        self.policy_setup()
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write('import_config_url="https://secret:password@example.invalid/config"\npost_scan_hook="/secret/hook"\n')
+        output = self.policy()
+        self.assertIn('import_config_url differs', output)
+        self.assertIn('post_scan_hook differs', output)
+        self.assertNotIn('password', output)
+        self.assertNotIn('/secret/hook', output)
+
+    def test_external_config_is_never_executed(self):
+        self.policy_setup()
+        marker = self.work / 'must not exist'
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write(f'quarantine_on_error="$(touch \'{marker}\')"\n')
+        self.assertIn('quarantine_on_error cannot be safely resolved', self.policy())
+        self.assertFalse(marker.exists())
+
+    def test_conditional_configuration_is_unknown(self):
+        self.policy_setup()
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write('if true; then\nquarantine_on_error=1\nfi\n')
+        self.assertIn('cannot be safely resolved', self.policy())
+
+    def test_config_literal_comments_crlf_duplicate_keys(self):
+        file = self.work / 'literal conf'
+        file.write_bytes(b'  quarantine_on_error="1"\r\n export quarantine_on_error = \'0\' # policy\r\n')
+        output = self.run_shell(f'_lmd_config_get {Q(str(file))} quarantine_on_error')
+        self.assertEqual(output, '0')
+
+    def test_tuning_differences_are_informational(self):
+        self.policy_setup()
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write('scan_workers="4"\ncron_prune_days="14"\nscan_hashtype="sha256"\nemail_addr="private@example.invalid"\n')
+        output = self.policy()
+        self.assertNotIn('WARNING', output)
+        self.assertIn('scan_workers: 4', output)
+        self.assertIn('cron_prune_days: 14', output)
+        self.assertNotIn('private@example.invalid', output)
+
+    def test_disabled_config_check_retains_operational_helpers(self):
+        self.policy_setup()
+        (self.lmd / 'conf.maldet').unlink()
+        self.assertEqual('', self.policy('LMD_CONFIG_CHECK_ENABLED=0'))
+
+    def test_override_can_enable_program_updates(self):
+        self.policy_setup()
+        (self.lmd / 'cron/conf.maldet.cron').write_text('autoupdate_version="1"\nautoupdate_signatures="0"\n')
+        output = self.policy()
+        self.assertIn('WARNING LMD daily program override', output)
+        self.assertIn('effective daily program updates conflict', output)
+
+    def test_removed_override_is_detected(self):
+        self.policy_setup()
+        (self.lmd / 'cron/conf.maldet.cron').unlink()
+        output = self.policy()
+        self.assertIn('daily program override: configuration unavailable', output)
+        self.assertIn('effective daily autoupdate_version differs', output)
+
+    def test_cron_final_override_wins_over_sysconfig(self):
+        self.policy_setup()
+        with self.policy_sysconfig.open('a') as file:
+            file.write('autoupdate_version="1"\nautoupdate_signatures="1"\n')
+        self.assertNotIn('WARNING', self.policy())
+
+    def test_compatibility_overlay_quarantine_drift(self):
+        self.policy_setup()
+        (self.lmd / 'internals/compat.conf').write_text('quarantine_on_error="1"\n')
+        self.assertIn('WARNING LMD configuration override: quarantine_on_error differs', self.policy())
+
+    def test_default_monitor_environment_overrides_sysconfig(self):
+        self.policy_setup()
+        self.policy_default.write_text('MONITOR_MODE="users"\n')
+        self.assertIn('effective MONITOR_MODE differs', self.policy())
+
+    def test_monitor_fallback_to_base_configuration(self):
+        self.policy_setup()
+        self.policy_sysconfig.unlink()
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write(f'default_monitor_mode="{self.lmd}/directadmin-webroots"\n')
+        output = self.policy()
+        self.assertIn('uses default_monitor_mode fallback', output)
+        self.assertIn('PASS LMD effective MONITOR_MODE', output)
+
+    def test_monitor_unit_changed_to_fixed_target(self):
+        self.policy_setup()
+        self.policy_unit.write_text(self.policy_unit.read_text().replace('${MONITOR_MODE}', 'users'))
+        self.assertIn('effective MONITOR_MODE unknown', self.policy())
+
+    def test_daily_script_ignores_override(self):
+        self.policy_setup()
+        self.policy_daily.write_text(self.policy_daily.read_text().replace('    . $cron_custom_conf\n', ''))
+        self.assertIn('effective update behavior UNKNOWN', self.policy())
+
+    def test_daily_script_unconditional_update(self):
+        self.policy_setup()
+        with self.policy_daily.open('a') as file:
+            file.write('$inspath/maldet -d\n')
+        self.assertIn('effective update behavior UNKNOWN', self.policy())
+
+    def test_daily_script_changed_override_binding(self):
+        self.policy_setup()
+        file = self.lmd / 'internals/internals.conf'
+        file.write_text(file.read_text().replace('cron/conf.maldet.cron', 'cron/other.conf'))
+        self.assertIn('effective update behavior UNKNOWN', self.policy())
+
+    def test_daily_script_not_executable(self):
+        self.policy_setup()
+        self.policy_daily.chmod(0o600)
+        self.assertIn('effective update behavior UNKNOWN', self.policy())
+
+    def test_sigup_cron_disabled_or_retimed(self):
+        self.policy_setup()
+        self.policy_sigup.write_text('# disabled job\n')
+        self.assertIn('expected exactly one active job, found 0', self.policy())
+        self.policy_sigup.write_text(f'0 */12 * * * root "{self.lmd}/maldet" --cron-sigup\n')
+        self.assertIn('sigup cron schedule/user mismatch', self.policy())
+
+    def test_signature_interval_drives_cron_expectation(self):
+        self.policy_setup()
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write('sigup_interval="4"\n')
+        self.policy_sigup.write_text(self.policy_sigup.read_text().replace('*/6', '*/4'))
+        self.assertNotIn('WARNING', self.policy('LMD_EXPECT_SIGUP_INTERVAL=4'))
+
+    def test_cron_unexpected_program_update_command(self):
+        self.policy_setup()
+        with self.policy_sigup.open('a') as file:
+            file.write(f'0 1 * * * root "{self.lmd}/maldet" -d\n')
+        output = self.policy()
+        self.assertIn('expected independent --cron-sigup', output)
+        self.assertIn('expected exactly one active job, found 2', output)
+
+    def test_cron_shell_injection_is_not_executed(self):
+        self.policy_setup()
+        marker = self.work / 'never execute'
+        self.policy_sigup.write_text(f'0 */6 * * * root "{self.lmd}/maldet" --cron-sigup; touch "{marker}"\n')
+        self.assertIn('command is not safely recognizable', self.policy())
+        self.assertFalse(marker.exists())
+
+    def test_fullscan_schedule_and_target_drift(self):
+        self.policy_setup()
+        self.policy_scan.write_text(self.policy_scan.read_text().replace('30 0 * * 0', '30 1 * * 1').replace('/home/?/domains/?/public_html/', '/home/'))
+        output = self.policy()
+        self.assertIn('fullscan cron schedule/user mismatch', output)
+        self.assertIn('fullscan cron arguments/target mismatch', output)
+
+    def test_custom_daily_commands_require_review(self):
+        self.policy_setup()
+        (self.lmd / 'cron/custom.cron').write_text('maldet -d\n')
+        self.assertIn('daily custom.cron contains commands', self.policy())
+
+    def test_expected_configuration_validation(self):
+        for key, value in [('LMD_EXPECT_QUARANTINE_ON_ERROR', '2'), ('LMD_EXPECT_SCAN_CLAMSCAN', 'maybe'), ('LMD_EXPECT_SIGUP_INTERVAL', '-6')]:
+            self.assertIn('ERROR', self.config_test(f'{key}={value}\n', 1))
+        self.config_test('LMD_EXPECT_IMPORT_CONFIG_URL=""\nLMD_EXPECT_POST_SCAN_HOOK=""\nLMD_EXPECT_CRON_PRUNE_DAYS=0\n')
+
+    def test_fullscan_unquoted_target_is_not_safe(self):
+        self.policy_setup()
+        self.policy_scan.write_text(self.policy_scan.read_text().replace("'/home/?/domains/?/public_html/'", '/home/?/domains/?/public_html/'))
+        self.assertIn('command is not safely recognizable', self.policy())
+
+    def test_monitor_export_assignment_not_valid_for_systemd(self):
+        self.policy_setup()
+        self.policy_sysconfig.write_text('export ' + self.policy_sysconfig.read_text())
+        self.assertIn('not a systemd EnvironmentFile assignment', self.policy())
+
+    def test_monitor_fallback_includes_runtime_overlay(self):
+        self.policy_setup()
+        self.policy_sysconfig.write_text('default_monitor_mode="users"\n')
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write(f'default_monitor_mode="{self.lmd}/directadmin-webroots"\n')
+        self.assertIn('effective MONITOR_MODE differs', self.policy())
+
+    def test_daily_override_with_false_file_guard_is_unknown(self):
+        self.policy_setup()
+        self.policy_daily.write_text(self.policy_daily.read_text().replace('if [ -f "$cron_custom_conf" ]; then', 'if false; then'))
+        self.assertIn('effective update behavior UNKNOWN', self.policy())
+
+    def test_intentional_literal_import_query_string(self):
+        self.policy_setup()
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write('import_config_url="https://example.invalid/config?a=1&b=2"\n')
+        output = self.policy('LMD_EXPECT_IMPORT_CONFIG_URL="https://example.invalid/config?a=1&b=2"')
+        self.assertIn('import_config_url matches', output)
+        self.assertNotIn('WARNING', output)
+
+    def test_policy_helper_not_a_separate_registered_integration(self):
+        result = self.main('', ['--list-checks'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines().count('lmd'), 1)
+        self.assertNotIn('lmd_policy', result.stdout)
+
+    def test_critical_notification_precedes_many_policy_warnings(self):
+        library = self.work / 'test library'
+        shutil.copytree(ROOT / 'lib', library)
+        marker = self.work / 'captured curl arguments'
+        with (library / 'notify/telegram.sh').open('a') as file:
+            file.write('\ncurl() { printf "%s\\n" "$@" > ' + Q(str(marker)) + '; }\n')
+        (library / 'checks/notification_fixture.sh').write_text(
+            'hc_register_check notification_fixture\n'
+            'check_notification_fixture() { local i; for i in {1..100}; do hc_warn "Configuration policy drift in setting number $i requiring review"; done; hc_status CRITICAL "LMD full scan found malware"; }\n')
+        result = self.main('NOTIFY_TELEGRAM=1\nTELEGRAM_BOT_TOKEN=fixture\nTELEGRAM_CHAT_ID=fixture\n', lib_dir=library)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        output = marker.read_text()
+        self.assertIn('1. CRITICAL LMD full scan found malware', output)
+        self.assertIn('Truncated', output)
+        self.assertLess(len(output), 4096)
 
 
 if __name__ == '__main__':

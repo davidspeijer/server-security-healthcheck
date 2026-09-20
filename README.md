@@ -1,6 +1,6 @@
 # Server Security Healthcheck
 
-Current version: **v0.4.0**.
+Current version: **v0.5.0**.
 
 Standalone, modular, read-only security healthcheck for Linux servers. It reports
 operational problems; it does not scan files for malware, remediate, restart
@@ -127,7 +127,7 @@ overrides from untrusted users in a privileged wrapper.
 | `LMD_WEBROOT_LIST` | `LMD_MONITOR_LIST`, otherwise `$LMD_DIR/directadmin-webroots` | Realtime configured paths |
 | `CHECK_DIRECTADMIN_WEBROOTS` | `0` | Opt-in discovery/coverage comparison |
 | `DIRECTADMIN_HOME` | `/home` | Root for the DirectAdmin directory layout |
-| `LMD_EXPECT_QUARANTINE_ENABLED` | `0` | `0`, `1`, `ignore`; compare recorded scan policy |
+| `LMD_EXPECT_QUARANTINE_ENABLED` | `0` | `0`, `1`, `ignore`; compare recorded scan policy; new example explicitly sets `1` |
 
 New keys take precedence over aliases. `CHECK_LMD`, `LMD_MONITOR_LIST` and
 `FULLSCAN_MAX_AGE_DAYS` continue working without edits. `LMD_SIG_MAX_AGE_HOURS` is
@@ -171,8 +171,10 @@ separately and cannot contaminate signature status.
 failure/age warnings. For example, an administrator may temporarily disable LMD
 program updates because of an upstream checksum/integrity problem. `enabled`
 reports unresolved recent failures as WARNING; `ignore` skips the check. This is
-**declared policy**, not verification of the actual cron/LMD autoupdate setting.
-No LMD configuration is sourced and no LMD credentials are read.
+**declared policy** for operational log checks. The separate configuration check
+also compares the base/override settings and the recognized daily-cron update
+section against that policy. No LMD configuration is sourced and no LMD notification
+credentials are extracted or used.
 
 ### Weekly fullscan metadata and hits
 
@@ -221,6 +223,131 @@ non-test hits with quarantine disabled, output explicitly warns that detected
 files may still be accessible. Enabled policy or a stored quarantine path does
 not prove that remediation succeeded. This tool never quarantines or removes files.
 
+The example configuration now declares `LMD_EXPECT_QUARANTINE_ENABLED=1` for a
+policy of automatically isolating malware detections. The intended companion LMD
+settings, managed separately in LMD, are:
+
+```ini
+quarantine_hits="1"
+quarantine_clean="0"
+quarantine_suspend_user="0"
+quarantine_on_error="0"
+```
+
+This policy requests quarantine for detections, without automatic cleaning or
+account suspension, and avoids requesting quarantine solely because of a scanner
+error. It is an operational choice to reduce availability impact from scanner
+errors; it is not a guarantee that every detection is a true positive.
+
+The healthcheck now verifies the live literal quarantine settings as well as the
+quarantine-enabled flag recorded in scan metadata. `quarantine_clean`,
+`quarantine_suspend_user` and `quarantine_on_error` are expected to be `0` unless
+configured otherwise. The live file check and historical scan policy are reported
+separately. No LMD settings are changed.
+
+Upgrades preserve active configuration. To adopt this policy, explicitly set
+`LMD_EXPECT_QUARANTINE_ENABLED=1` in the installed healthcheck configuration after
+configuring LMD separately. If the key is absent, the compatibility default remains
+`0`. Older completed scans can report a mismatch until a scan records the new
+policy; their metadata describes the scan-time policy, not today's live settings.
+
+### Live configuration and cron policy
+
+`LMD_CONFIG_CHECK_ENABLED=1` (also the code default) enables read-only checks when
+the LMD integration runs. Set it to `0` to skip this policy profile while retaining
+all operational checks. No extra runtime dependency is introduced. Existing
+configuration is preserved on upgrade; missing new settings use the defaults
+below. Adapt the expectations for another server layout or update policy.
+
+| Expectation | Default | Enforcement |
+| --- | --- | --- |
+| `LMD_EXPECT_EMAIL_ALERT` | `1` | WARNING on mismatch |
+| `LMD_EXPECT_AUTOUPDATE_SIGNATURES` | `1` | Base `conf.maldet` |
+| `LMD_EXPECT_SIGUP_INTERVAL` | `6` | Base interval; derives expected signature schedule |
+| `LMD_EXPECT_AUTOUPDATE_VERSION` | `1` | Base `conf.maldet` |
+| `LMD_EXPECT_CRON_AUTOUPDATE_VERSION` | `0` | Daily override and combined daily value |
+| `LMD_EXPECT_CRON_AUTOUPDATE_SIGNATURES` | `0` | Daily override and combined daily value |
+| `LMD_EXPECT_SCAN_CLAMSCAN` | `auto` | Exact expected engine mode (`0`, `1`, `auto`) |
+| `LMD_EXPECT_QUARANTINE_CLEAN` | `0` | No automatic cleaning |
+| `LMD_EXPECT_QUARANTINE_SUSPEND_USER` | `0` | No automatic account suspension |
+| `LMD_EXPECT_QUARANTINE_ON_ERROR` | `0` | No quarantine solely on scanner error |
+| `LMD_EXPECT_MONITOR_MODE` | Configured webroot list | Effective monitor target |
+| `LMD_EXPECT_INOTIFY_SLEEP` | `15` | Monitor timing |
+| `LMD_EXPECT_INOTIFY_RELOADTIME` | `3600` | Monitor reload timing |
+| `LMD_EXPECT_IMPORT_CONFIG_URL` | Empty | Unexpected remote import is WARNING |
+| `LMD_EXPECT_POST_SCAN_HOOK` | Empty | Unexpected post-scan hook is WARNING |
+| `LMD_EXPECT_SCAN_WORKERS` | `auto` | INFO only; preference, not enforced |
+| `LMD_EXPECT_CRON_PRUNE_DAYS` | `21` | INFO only; preference, not enforced |
+| `LMD_EXPECT_SIGUP_SCHEDULE` | `0 */6 * * *`, derived from interval | Exact five cron fields |
+| `LMD_EXPECT_FULLSCAN_SCHEDULE` | `30 0 * * 0` | Sunday 00:30 |
+
+`LMD_EXPECT_QUARANTINE_ENABLED` is shared with the historical scan check, keeping
+its compatibility default of `0`; the example explicitly sets it to `1`. Policy
+expectations accept `ignore` to skip that comparison. A quoted empty value for
+imports/hooks means **must be explicitly empty**, not ignore. Missing or dynamic
+values produce WARNING. `scan_hashtype`, `email_addr` and `email_subj` are INFO
+only. Recipient/subject values are redacted; hook commands and import URLs are
+never printed in mismatch messages. Healthcheck notifications still use only its
+own Telegram settings.
+
+The profile reads these locations (each has an optional path override):
+
+| Input | Default | Override key |
+| --- | --- | --- |
+| Base config | `$LMD_DIR/conf.maldet` | `LMD_CONFIG_FILE` |
+| Daily override | `$LMD_DIR/cron/conf.maldet.cron` | `LMD_CRON_CONFIG_FILE` |
+| Compatibility overlay | `$LMD_DIR/internals/compat.conf` | `LMD_COMPAT_CONFIG_FILE` |
+| Monitor environment | `/etc/sysconfig/maldet` | `LMD_SYSCONFIG_FILE` |
+| Alternative environment | `/etc/default/maldet` | `LMD_DEFAULT_FILE` |
+| Daily script | `/etc/cron.daily/maldet` | `LMD_DAILY_CRON_FILE` |
+| Signature job | `/etc/cron.d/maldet-sigup` | `LMD_SIGUP_CRON_FILE` |
+| Weekly scan job | `/etc/cron.d/maldet-fullscan` | `LMD_FULLSCAN_CRON_FILE` |
+
+The `$LMD_DIR` notation describes defaults calculated by code, not expansion in
+healthcheck configuration. The bounded daily-script recognizer also reads
+`$LMD_DIR/internals/internals.conf` path bindings. If a nonempty daily custom hook
+or applicable DTC import is present, additional behavior requires review.
+
+For the supplied setup, base signature/program switches are both `1`, but the
+**daily** override sets both to `0`. The recognized daily source order is base →
+compatibility overlay → sysconfig (or default when sysconfig is absent) → daily
+override. Policy-sensitive overrides are checked too, so a changed quarantine
+setting in an overlay cannot silently bypass the base comparison.
+
+Independent signature updates must still be scheduled via:
+
+```cron
+0 */6 * * * root /usr/local/maldetect/maldet --cron-sigup >> /dev/null 2>&1
+```
+
+The weekly definition must match the configured schedule and fullscan target:
+
+```cron
+30 0 * * 0 root /usr/bin/flock -n /var/run/maldet-fullscan.lock /usr/local/maldetect/maldet -b -a '/home/?/domains/?/public_html/' >> /var/log/maldet/fullscan-cron.log 2>&1
+```
+
+Thus a daily signature override of `0` is not confused with disabling the separate
+six-hour signature job. A base program switch of `1` is not confused with enabled
+daily program updates. Missing/commented jobs, different schedules or targets,
+extra jobs in the selected files, unexpected commands and removed overrides are
+reported. Recognized cron commands are parsed as literal tokens, never executed.
+
+Monitor resolution differs: the stock systemd unit loads **both** environment
+files in order, with `/etc/default/maldet` last. The unit definition is checked for
+that supported layout and its `--monitor ${MONITOR_MODE}` argument. An absent/empty
+mode falls back to `default_monitor_mode`, including applicable runtime overlays.
+Unknown unit layouts/drop-ins are WARNING rather than an assumed effective mode.
+
+These are **static configuration checks**, not proof that cron is executing or the
+running service has reloaded its settings. The daily recognizer supports the stock
+LMD 2.x update/source section; altered/indirect shell logic is UNKNOWN/WARNING.
+It is not a general shell interpreter or exhaustive audit of other cron files,
+user crontabs, systemd timers, executable integrity or cron-daemon health. Schedule
+comparison is textual after whitespace normalization; equivalent alternative cron
+expressions should be configured explicitly. Cron environment directives, custom
+wrappers and percent expansion require review. Operational heartbeats, signature
+success logs and scan completion metadata remain independent checks.
+
 ### ClamAV / FreshClam
 
 Retained settings: `CLAM_SIG_MAX_AGE_HOURS=48`, `FRESHCLAM_MAX_AGE_HOURS=36`,
@@ -243,8 +370,9 @@ Set `NOTIFY_TELEGRAM=1` in `healthcheck.conf` and set `TELEGRAM_BOT_TOKEN` and
 sudo server-security-healthcheck --test-notification
 ```
 
-Only warnings/critical findings trigger normal notifications. Messages are plain
-text, with bounded length; full diagnostics remain in CLI/systemd output. Telegram
+Only warnings/critical findings trigger normal notifications. Critical findings
+come first so a burst of policy warnings cannot hide them through truncation.
+Messages are plain text, with bounded length; full diagnostics remain in CLI/systemd output. Telegram
 is the only intentional network write during a check; enable it only when sending
 these operational details is appropriate. Configured LMD secrets are never used.
 
@@ -261,7 +389,7 @@ these operational details is appropriate. Configured LMD secrets are never used.
   INFO LMD full scan engine: clamdscan
   PASS LMD full scan: no hits
   INFO LMD automatic program update intentionally disabled
-  INFO LMD automatic quarantine disabled by scan policy
+  INFO LMD automatic quarantine enabled by scan policy
 ```
 
 With test detections: `WARNING Full scan contains 2 EICAR/test detections`.

@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.0 — 2026-09-20
+
+- Updated the example quarantine expectation to enabled, with a separately managed
+  LMD policy of no automatic cleaning, account suspension or quarantine on scanner
+  error. Existing active configuration and the absent-key default remain unchanged.
+- Added read-only live LMD policy validation for quarantine (including on-error),
+  signature/program updates, ClamAV mode, monitoring, alerts, imports and hooks.
+- Added combined base/compatibility/environment/daily-override evaluation and
+  bounded structural inspection of the actual daily script and cron definitions.
+- Verify independent signature scheduling and weekly fullscan target/schedule;
+  keep operational evidence separate from static configuration.
+- Report tuning settings as INFO only, redact sensitive values, and never source
+  external config or execute cron scripts. Added production-policy regression tests.
+- Prioritize critical findings before warnings in bounded Telegram summaries.
+
 ## v0.4.0 — 2026-09-20
 
 - Expanded LMD operational health monitoring, with separate realtime monitor,

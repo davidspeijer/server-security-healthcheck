@@ -77,3 +77,10 @@ Coverage uses private scratch files; cleanup is restricted to those files.
 Telegram truncates large summaries while local output retains full diagnostics.
 Installation/removal scripts perform their explicit administrative tasks outside
 the read-only check contract and preserve existing user configuration.
+
+
+LMD policy helpers in `lib/checks/lmd_policy.sh` are loaded with the check modules
+but do not register a standalone integration. `check_lmd` calls them only after
+LMD enablement/availability checks. Live-file expectations, bounded cron/unit
+recognition and historical scan evidence remain distinct. Policy parsing is
+read-only, and unknown shell constructs never become a healthy effective value.
