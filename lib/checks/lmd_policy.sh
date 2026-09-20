@@ -13,9 +13,13 @@ _lmd_trim() {
 # Non-assignment shell statements make the file unknown rather than approximating
 # conditionals, includes or unset. Repeated unconditional assignments: last wins.
 _lmd_config_get() {
-    local file="$1" wanted="$2" line key value quote rest found=0 invalid=0
+    [ -f "$1" ] && [ -r "$1" ] || return 3
+    _lmd_config_stream "$2" < "$1"
+}
+
+_lmd_config_stream() {
+    local wanted="$1" line key value quote rest found=0 invalid=0
     local assignment='^(export[[:space:]]+)?([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=(.*)$'
-    [ -f "$file" ] && [ -r "$file" ] || return 3
     value=''
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"
@@ -42,16 +46,99 @@ _lmd_config_get() {
         # Reject expansions even inside quotes: their effective value would depend
         # on LMD's shell context, which a read-only policy check must not execute.
         case "$value" in *'$'*|*'`'*|*"\\"*) invalid=1 ;; esac
-    done < "$file"
+    done
     [ "$found" -eq 1 ] || return 1
     [ "$invalid" -eq 0 ] || return 2
     printf '%s' "$value"
 }
 
+# Compatibility migrations are data only within this deliberately small grammar.
+# Helpers use the caller's local maps; names originate from validated identifiers.
+_lmd_compat_load() {
+    local name="$1" result rc
+    [ "${compat_state[$name]+set}" ] && return 0
+    result="$(_lmd_config_get "$LMD_POLICY_MAIN" "$name")"; rc=$?
+    case "$rc" in
+        0|1) compat_state[$name]=known; compat_value[$name]="$result" ;;
+        *) compat_state[$name]=unknown; compat_value[$name]='' ;;
+    esac
+}
+
+# Patterns below intentionally contain literal shell variable syntax.
+# shellcheck disable=SC2016
+_lmd_compat_get() {
+    local file="$1" wanted="$2" line mode='' target='' source='' guard='' stage=0 value rc condition
+    local fallback='^if \[ ! "\$([a-zA-Z_][a-zA-Z0-9_]*)" \] && \[ "\$([a-zA-Z_][a-zA-Z0-9_]*)" \]; then$'
+    local assignment='^(export[[:space:]]+)?([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*='
+    local -A compat_state=() compat_value=() compat_changed=()
+    [ -f "$file" ] && [ -r "$file" ] || return 3
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="$(_lmd_trim "${line%$'\r'}")"
+        [[ -z "$line" || "$line" = \#* ]] && continue
+        if [ "$stage" = 1 ]; then
+            [ "$line" = "$target=\"\$$source\"" ] || return 2
+            stage=2
+            continue
+        elif [ "$stage" = 2 ]; then
+            [ "$line" = "fi" ] || return 2
+            stage=0
+            _lmd_compat_load "$target"
+            _lmd_compat_load "$source"
+            condition=yes
+            if [ "$mode" = fallback ]; then
+                if [ "${compat_state[$target]}" = unknown ]; then condition=unknown
+                elif [ -n "${compat_value[$target]}" ]; then condition=no; fi
+            elif [ "$mode" = depth ]; then
+                _lmd_compat_load "$guard"
+                if [ "${compat_state[$guard]}" = unknown ]; then condition=unknown
+                elif [ "${compat_value[$guard]}" != 1 ]; then condition=no; fi
+            fi
+            # Every supported migration also requires a nonempty source.
+            if [ "${compat_state[$source]}" = known ] && [ -z "${compat_value[$source]}" ]; then condition=no; fi
+            [ "$condition" != no ] || continue
+            compat_changed[$target]=1
+            if [ "$condition" = unknown ] || [ "${compat_state[$source]}" = unknown ]; then
+                compat_state[$target]=unknown
+            else
+                compat_state[$target]=known
+                compat_value[$target]="${compat_value[$source]}"
+            fi
+            continue
+        fi
+        if [[ "$line" =~ $fallback ]]; then
+            target="${BASH_REMATCH[1]}" source="${BASH_REMATCH[2]}" mode=fallback stage=1
+        elif [ "$line" = 'if [ "${scan_hexfifo:-0}" = "1" ] && [ "$scan_hexfifo_depth" ]; then' ]; then
+            target=scan_hexdepth source=scan_hexfifo_depth guard=scan_hexfifo mode=depth stage=1
+        elif [ "$line" = 'if [ "$scan_hex_workers" ]; then' ]; then
+            target=scan_workers source=scan_hex_workers mode=source stage=1
+        elif [[ "$line" =~ $assignment ]]; then
+            target="${BASH_REMATCH[2]}"
+            value="$(_lmd_config_stream "$target" <<< "$line")"; rc=$?
+            compat_changed[$target]=1
+            compat_value[$target]="$value"
+            if [ "$rc" = 0 ]; then compat_state[$target]=known; else return 2; fi
+        else
+            return 2
+        fi
+    done < "$file"
+    [ "$stage" = 0 ] || return 2
+    [ "${compat_changed[$wanted]:-0}" = 1 ] || return 1
+    [ "${compat_state[$wanted]}" = known ] || return 2
+    printf '%s' "${compat_value[$wanted]}"
+}
+
+_lmd_policy_get() {
+    if [ "$1" = "${LMD_POLICY_COMPAT:-}" ]; then
+        _lmd_compat_get "$1" "$2"
+    else
+        _lmd_config_get "$1" "$2"
+    fi
+}
+
 _lmd_policy_compare() {
     local file="$1" key="$2" expected="$3" label="$4" optional="${5:-0}" value status
     [ "$expected" = ignore ] && return 0
-    value="$(_lmd_config_get "$file" "$key")"; status=$?
+    value="$(_lmd_policy_get "$file" "$key")"; status=$?
     if [ "$status" -eq 1 ] && [ "$optional" = 1 ]; then return 0; fi
     case "$status" in
         1) hc_warn "LMD $label: $key missing in $file" ;;
@@ -88,7 +175,7 @@ _lmd_effective_config_value() {
     [ "$scope" != daily ] || files+=("$LMD_POLICY_CRON")
     for file in "${files[@]}"; do
         [ -e "$file" ] || continue
-        next="$(_lmd_config_get "$file" "$key")"; status=$?
+        next="$(_lmd_policy_get "$file" "$key")"; status=$?
         case "$status" in
             0) value="$next" ;;
             1) ;;

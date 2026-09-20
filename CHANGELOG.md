@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Fixed false LMD configuration-override warnings for the standard conditional
+  migrations in `internals/compat.conf` (including untouched `email_alert`).
+  Resolve supported legacy mappings without executing shell code; preserve
+  nonempty modern values, including `0`, and warn on unsupported constructs.
+- Added regression coverage for compatibility migrations, chained values,
+  dynamic legacy settings and malformed or executable input.
+
 ## v0.5.0 — 2026-09-20
 
 - Updated the example quarantine expectation to enabled, with a separately managed

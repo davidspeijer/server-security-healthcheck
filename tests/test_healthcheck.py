@@ -603,6 +603,64 @@ systemctl() {{ if [ "$1" = cat ]; then command cat {Q(str(self.policy_unit))}; e
         self.assertIn('PASS LMD fullscan cron definition matches', output)
         self.assertIn('PASS LMD effective MONITOR_MODE matches', output)
 
+    def compat_get(self, content, key, base=''):
+        self.policy_setup()
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write(base)
+        compat = self.lmd / 'internals/compat.conf'
+        compat.write_text(content)
+        return self.run_shell(f'''LMD_POLICY_MAIN={Q(str(self.lmd / 'conf.maldet'))}
+LMD_POLICY_COMPAT={Q(str(compat))}
+value="$(_lmd_policy_get "$LMD_POLICY_COMPAT" {Q(key)})"; rc=$?
+printf '%s:%s' "$rc" "$value"
+''')
+
+    def test_compat_migrations_do_not_override_modern_policy(self):
+        self.policy_setup()
+        (self.lmd / 'internals/compat.conf').write_text(
+            'if [ ! "$quarantine_clean" ] && [ "$quar_clean" ]; then\n'
+            '    quarantine_clean="$quar_clean"\nfi\n'
+            'if [ ! "$scan_clamscan" ] && [ "$clamav_scan" ]; then\n'
+            '    scan_clamscan="$clamav_scan"\nfi\n')
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write('quar_clean="1"\nclamav_scan="0"\n')
+        self.assertNotIn('WARNING', self.policy())
+
+    def test_compat_fallback_and_chained_mapping(self):
+        content = ('if [ ! "$first" ] && [ "$legacy" ]; then\n'
+                   'first="$legacy"\nfi\n'
+                   'if [ ! "$second" ] && [ "$first" ]; then\n'
+                   'second="$first"\nfi\n')
+        self.assertEqual('0:0', self.compat_get(content, 'second', 'legacy="0"\n'))
+
+    def test_compat_special_depth_migration(self):
+        content = ('if [ "${scan_hexfifo:-0}" = "1" ] && [ "$scan_hexfifo_depth" ]; then\n'
+                   'scan_hexdepth="$scan_hexfifo_depth"\nfi\n')
+        self.assertEqual('0:4096', self.compat_get(content, 'scan_hexdepth',
+                         'scan_hexfifo="1"\nscan_hexfifo_depth="4096"\n'))
+
+    def test_compat_special_workers_migration(self):
+        content = 'if [ "$scan_hex_workers" ]; then\nscan_workers="$scan_hex_workers"\nfi\n'
+        self.assertEqual('0:4', self.compat_get(content, 'scan_workers', 'scan_hex_workers="4"\n'))
+
+    def test_compat_dynamic_legacy_only_warns_when_needed(self):
+        content = 'if [ ! "$quarantine_clean" ] && [ "$quar_clean" ]; then\nquarantine_clean="$quar_clean"\nfi\n'
+        self.assertEqual('1:', self.compat_get(content, 'quarantine_clean', 'quar_clean="$unknown"\n'))
+        self.assertEqual('2:', self.compat_get(content, 'quarantine_clean',
+                         'quarantine_clean=""\nquar_clean="$unknown"\n'))
+        self.assertEqual('1:', self.compat_get(content, 'email_alert', 'quar_clean="$unknown"\n'))
+
+    def test_compat_rejects_unknown_shell_and_malformed_migrations(self):
+        marker = self.work / 'executed'
+        for content in [f'touch {Q(str(marker))}\n',
+                        'if [ ! "$a" ] && [ "$b" ]; then\nc="$b"\nfi\n',
+                        'if [ ! "$a" ] && [ "$b" ]; then\na="$b"\n',
+                        'email_alert="1"; email_alert="0"\n',
+                        f'email_alert="$(touch {marker})"\n']:
+            with self.subTest(content=content):
+                self.assertEqual('2:', self.compat_get(content, 'email_alert'))
+        self.assertFalse(marker.exists())
+
     def test_live_quarantine_on_error_drift(self):
         self.policy_setup()
         with (self.lmd / 'conf.maldet').open('a') as file:

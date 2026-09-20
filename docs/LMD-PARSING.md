@@ -90,6 +90,15 @@ CRLF, optional `export`, quoted strings and duplicate unconditional assignments
 non-assignment statements in config files. It is intentionally not a full shell
 configuration interpreter. Unrelated assignments are not extracted or printed.
 
+The compatibility overlay uses a separate bounded parser for the standard LMD
+legacy fallback blocks and the 2.0.1 hex-depth/worker migrations. It resolves
+literal base values and earlier migrations in file order, without sourcing the
+file. A nonempty modern value (including `0`) prevents a fallback. Untouched
+keys are not reported as overrides. Unknown shell constructs, mismatched or
+unfinished blocks still cause a warning; unknown values propagate when needed
+to determine the requested setting. Other configuration files retain the strict
+literal-only grammar.
+
 Selected protection settings are compared in the base and any present overlays.
 The default daily source precedence is base, compatibility overlay, sysconfig (or
 its default-file fallback), then cron override. Missing cron switches inherit the
