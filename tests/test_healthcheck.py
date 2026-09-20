@@ -404,7 +404,7 @@ CHECK_LMD=0
     def test_version(self):
         result = self.main('', ['--version'])
         self.assertEqual(result.returncode, 0)
-        self.assertIn('v0.5.0', result.stdout)
+        self.assertIn('v0.5.1', result.stdout)
 
     def test_unknown_argument(self):
         self.assertEqual(self.main('', ['--unknown']).returncode, 2)
@@ -660,6 +660,40 @@ printf '%s:%s' "$rc" "$value"
             with self.subTest(content=content):
                 self.assertEqual('2:', self.compat_get(content, 'email_alert'))
         self.assertFalse(marker.exists())
+
+    def test_policy_parses_each_file_and_compat_once_per_run(self):
+        self.policy_setup()
+        compat = self.lmd / 'internals/compat.conf'
+        compat.write_text('if [ ! "$quarantine_clean" ] && [ "$quar_clean" ]; then\n'
+                          'quarantine_clean="$quar_clean"\nfi\n')
+        counts = self.work / 'parse-counts'
+        output = self.policy(f'''
+eval "$(declare -f _lmd_config_stream | sed '1s/_lmd_config_stream/_original_config_stream/')"
+eval "$(declare -f _lmd_compat_compute | sed '1s/_lmd_compat_compute/_original_compat_compute/')"
+_lmd_config_stream() {{ printf 'config:%s\\n' "${{2:-uncached}}" >> {Q(str(counts))}; _original_config_stream "$@"; }}
+_lmd_compat_compute() {{ printf 'compat\\n' >> {Q(str(counts))}; _original_compat_compute "$@"; }}
+''')
+        self.assertNotIn('WARNING', output)
+        self.assertCountEqual(counts.read_text().splitlines(), [
+            f'config:{self.lmd / "conf.maldet"}',
+            f'config:{self.policy_sysconfig}',
+            f'config:{self.lmd / "cron/conf.maldet.cron"}', 'compat'])
+
+    def test_policy_cache_refreshes_between_runs(self):
+        self.policy_setup()
+        compat = self.lmd / 'internals/compat.conf'
+        compat.write_text('quarantine_on_error="0"\n')
+        output = self.run_shell(self.policy_prefix + f'''
+_lmd_check_configuration
+printf 'quarantine_on_error="1"\\n' > {Q(str(compat))}
+printf 'email_alert="0"\\n' >> {Q(str(self.lmd / 'conf.maldet'))}
+printf '\\nSECOND RUN\\n'
+_lmd_check_configuration
+''')
+        first, second = output.split('SECOND RUN')
+        self.assertNotIn('WARNING', first)
+        self.assertIn('WARNING LMD base configuration: email_alert differs', second)
+        self.assertIn('WARNING LMD configuration override: quarantine_on_error differs', second)
 
     def test_live_quarantine_on_error_drift(self):
         self.policy_setup()

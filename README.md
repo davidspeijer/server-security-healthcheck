@@ -1,6 +1,6 @@
 # Server Security Healthcheck
 
-Current version: **v0.5.0**.
+Current version: **v0.5.1**.
 
 Standalone, modular, read-only security healthcheck for Linux servers. It reports
 operational problems; it does not scan files for malware, remediate, restart

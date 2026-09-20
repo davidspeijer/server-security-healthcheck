@@ -88,7 +88,15 @@ scan metadata are separate observations; neither is modified.
 CRLF, optional `export`, quoted strings and duplicate unconditional assignments
 (last wins). It rejects shell expansion/escape sequences in selected values and
 non-assignment statements in config files. It is intentionally not a full shell
-configuration interpreter. Unrelated assignments are not extracted or printed.
+configuration interpreter. Unrelated assignments are never printed.
+
+Each configuration check parses the base, environment and cron configuration
+files once into a local in-memory snapshot, then resolves compatibility migrations
+once. All policy lookups reuse those values and their parse statuses. The snapshot
+is discarded when the check returns and rebuilt on the next invocation; no cache
+files are written. The same parser serves cached and standalone lookups, preserving
+missing/empty/dynamic distinctions, whole-file structural errors and last-assignment
+precedence.
 
 The compatibility overlay uses a separate bounded parser for the standard LMD
 legacy fallback blocks and the 2.0.1 hex-depth/worker migrations. It resolves

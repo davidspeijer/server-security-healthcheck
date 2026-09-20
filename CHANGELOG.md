@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.5.1 — 2026-09-20
 
+- Parse LMD policy configuration and compatibility migrations once per check,
+  reusing an in-memory snapshot for subsequent settings. Rebuild the snapshot on
+  every invocation and retain the existing parsing and safety rules.
 - Fixed false LMD configuration-override warnings for the standard conditional
   migrations in `internals/compat.conf` (including untouched `email_alert`).
   Resolve supported legacy mappings without executing shell code; preserve

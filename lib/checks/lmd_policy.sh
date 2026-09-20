@@ -8,17 +8,25 @@ _lmd_trim() {
 }
 
 # Parse literal assignments, never source/eval external configuration. Only the
-# requested allowlisted key is returned: credentials and unrelated values stay
+# requested key is returned: credentials and unrelated values stay
 # out of diagnostics. Missing, empty, dynamic and unreadable are distinct states.
 # Non-assignment shell statements make the file unknown rather than approximating
 # conditionals, includes or unset. Repeated unconditional assignments: last wins.
 _lmd_config_get() {
+    if [ "${lmd_cache_active:-0}" = 1 ] && [ "${lmd_file_status[$1]+set}" ]; then
+        local entry="$1|$2" rc="${lmd_file_status[$1]}"
+        [ "$rc" = 0 ] || return "$rc"
+        rc="${lmd_key_status[$entry]:-1}"
+        [ "$rc" = 0 ] || return "$rc"
+        printf '%s' "${lmd_values[$entry]}"
+        return 0
+    fi
     [ -f "$1" ] && [ -r "$1" ] || return 3
     _lmd_config_stream "$2" < "$1"
 }
 
 _lmd_config_stream() {
-    local wanted="$1" line key value quote rest found=0 invalid=0
+    local wanted="$1" cache_file="${2:-}" line key value quote rest entry found=0 invalid=0
     local assignment='^(export[[:space:]]+)?([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=(.*)$'
     value=''
     while IFS= read -r line || [ -n "$line" ]; do
@@ -28,13 +36,13 @@ _lmd_config_stream() {
         [[ -z "$line" || "$line" = \#* ]] && continue
         [[ "$line" =~ $assignment ]] || return 2
         key="${BASH_REMATCH[2]}" rest="${BASH_REMATCH[3]}"
-        [ "$key" = "$wanted" ] || continue
+        [ -n "$cache_file" ] || [ "$key" = "$wanted" ] || continue
         found=1 invalid=0 quote=''
         value="${rest#"${rest%%[![:space:]]*}"}"
         value="${value%"${value##*[![:space:]]}"}"
         if [[ "$value" = \"* || "$value" = \'* ]]; then
             quote="${value:0:1}" value="${value:1}"
-            if [[ "$value" != *"$quote"* ]]; then invalid=1; continue; fi
+            if [[ "$value" != *"$quote"* ]]; then invalid=1; fi
             rest="${value#*"$quote"}" value="${value%%"$quote"*}"
             [[ "$rest" =~ ^[[:space:]]*(#.*)?$ ]] || invalid=1
         else
@@ -46,7 +54,13 @@ _lmd_config_stream() {
         # Reject expansions even inside quotes: their effective value would depend
         # on LMD's shell context, which a read-only policy check must not execute.
         case "$value" in *'$'*|*'`'*|*"\\"*) invalid=1 ;; esac
+        if [ -n "$cache_file" ]; then
+            entry="$cache_file|$key"
+            lmd_key_status[$entry]=$((invalid * 2))
+            lmd_values[$entry]="$value"
+        fi
     done
+    [ -z "$cache_file" ] || return 0
     [ "$found" -eq 1 ] || return 1
     [ "$invalid" -eq 0 ] || return 2
     printf '%s' "$value"
@@ -66,14 +80,15 @@ _lmd_compat_load() {
 
 # Patterns below intentionally contain literal shell variable syntax.
 # shellcheck disable=SC2016
-_lmd_compat_get() {
-    local file="$1" wanted="$2" line mode='' target='' source='' guard='' stage=0 value rc condition
+_lmd_compat_compute() {
+    local file="$1" line mode='' target='' source='' guard='' stage=0 value rc condition
     local fallback='^if \[ ! "\$([a-zA-Z_][a-zA-Z0-9_]*)" \] && \[ "\$([a-zA-Z_][a-zA-Z0-9_]*)" \]; then$'
     local assignment='^(export[[:space:]]+)?([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*='
-    local -A compat_state=() compat_value=() compat_changed=()
     [ -f "$file" ] && [ -r "$file" ] || return 3
     while IFS= read -r line || [ -n "$line" ]; do
-        line="$(_lmd_trim "${line%$'\r'}")"
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" || "$line" = \#* ]] && continue
         if [ "$stage" = 1 ]; then
             [ "$line" = "$target=\"\$$source\"" ] || return 2
@@ -122,6 +137,18 @@ _lmd_compat_get() {
         fi
     done < "$file"
     [ "$stage" = 0 ] || return 2
+    return 0
+}
+
+_lmd_compat_get() {
+    local wanted="$2" rc
+    if [ "${lmd_cache_active:-0}" = 1 ] && [ "$1" = "$LMD_POLICY_COMPAT" ]; then
+        rc="$lmd_compat_status"
+    else
+        local -A compat_state=() compat_value=() compat_changed=()
+        _lmd_compat_compute "$1"; rc=$?
+    fi
+    [ "$rc" = 0 ] || return "$rc"
     [ "${compat_changed[$wanted]:-0}" = 1 ] || return 1
     [ "${compat_state[$wanted]}" = known ] || return 2
     printf '%s' "${compat_value[$wanted]}"
@@ -399,6 +426,24 @@ _lmd_check_configuration() {
     LMD_POLICY_ENV="$default"
     [ ! -e "$sysconfig" ] || LMD_POLICY_ENV="$sysconfig"
     [ -r "$LMD_POLICY_MAIN" ] || { hc_warn "LMD configuration unavailable: $LMD_POLICY_MAIN"; return; }
+
+    # Build the snapshot in the parent shell, before command substitutions read it.
+    # Dynamic local scope limits cache lifetime to this invocation (also on errors).
+    local lmd_cache_active=1 lmd_compat_status=0
+    local -A lmd_file_status=() lmd_key_status=() lmd_values=()
+    local -A compat_state=() compat_value=() compat_changed=()
+    for file in "$LMD_POLICY_MAIN" "$sysconfig" "$default" "$LMD_POLICY_CRON"; do
+        [ ! "${lmd_file_status[$file]+set}" ] || continue
+        if [ -f "$file" ] && [ -r "$file" ]; then
+            # The file argument identifies the in-memory cache; no file is written.
+            # shellcheck disable=SC2094
+            _lmd_config_stream '' "$file" < "$file"; status=$?
+        else
+            status=3
+        fi
+        lmd_file_status[$file]="$status"
+    done
+    _lmd_compat_compute "$LMD_POLICY_COMPAT"; lmd_compat_status=$?
 
     _lmd_policy_setting email_alert "${LMD_EXPECT_EMAIL_ALERT:-1}"
     _lmd_policy_setting scan_clamscan "${LMD_EXPECT_SCAN_CLAMSCAN:-auto}"
