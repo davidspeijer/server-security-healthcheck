@@ -82,6 +82,7 @@ LMD_PROGRAM_UPDATE_EXPECTED=disabled
 LMD_EXPECT_QUARANTINE_ENABLED=1
 
 # Optional DirectAdmin layout comparison; enable explicitly on those servers.
+# Set to 1 when using update-maldet-webroots: independently verify its result.
 CHECK_DIRECTADMIN_WEBROOTS=0
 DIRECTADMIN_HOME=/home
 # Legacy LMD_MONITOR_LIST is used when LMD_WEBROOT_LIST is absent.

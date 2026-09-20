@@ -1,6 +1,6 @@
 # Server Security Healthcheck
 
-Current version: **v0.5.1**.
+Current version: **v0.5.2**.
 
 Standalone, modular, read-only security healthcheck for Linux servers. It reports
 operational problems; it does not scan files for malware, remediate, restart
@@ -154,6 +154,37 @@ list are normalized. Missing and stale/out-of-scope paths are printed, even when
 counts match. A mismatch is WARNING. Discovery failure is ERROR rather than a
 misleading empty-set success. This compares the configured list, not live kernel
 watch state. Symlinked webroots are excluded (`find -type d`, without `-L`).
+
+This selection matches an independent `update-maldet-webroots` synchronizer using
+the same DirectAdmin directory depth and exclusions. If that script runs every
+five minutes, enable the independent check with:
+
+```ini
+CHECK_DIRECTADMIN_WEBROOTS=1
+DIRECTADMIN_HOME=/home
+LMD_WEBROOT_LIST=/usr/local/maldetect/directadmin-webroots
+```
+
+The synchronizer maintains the list and requests an LMD reload. The healthcheck
+only regenerates the expected set in private scratch files and compares it with
+the configured list. It never runs the synchronizer, replaces the list or requests
+a reload. A matching list proves configured coverage, not that a reload succeeded;
+the separate monitor heartbeat/process checks remain necessary. Changes between
+synchronizer runs can briefly produce a mismatch; the healthcheck does not wait
+for or trigger the next synchronization.
+
+```text
+  PASS LMD realtime coverage: 77/77 webroots monitored
+  INFO LMD coverage counts:
+       Expected: 77
+       Configured: 77
+       Missing: 0
+       Stale: 0
+```
+
+For mismatches, WARNING includes all four counts (also in Telegram); CLI output
+additionally lists the missing and stale/out-of-scope paths. Counts are calculated
+from the actual sets, so equal totals cannot hide different paths.
 
 ### Signature checks versus program updates
 
@@ -381,7 +412,7 @@ these operational details is appropriate. Configured LMD secrets are never used.
 ```text
   PASS LMD realtime service and monitor process active
   PASS LMD realtime monitor activity: 2m ago
-  INFO LMD realtime coverage: 77/77 webroots monitored; configured: 77
+  PASS LMD realtime coverage: 77/77 webroots monitored
   PASS LMD signatures: already current; last check 2026-09-20 06:01:00 CEST
   PASS LMD weekly full scan completed: 2026-09-20 08:11:33 CEST
   INFO LMD full scan runtime: 7h 41m (27692 seconds)

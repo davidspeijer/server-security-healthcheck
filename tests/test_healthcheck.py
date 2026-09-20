@@ -280,16 +280,24 @@ pgrep() {{ return 0; }}
             (home / f'user/domains/{domain}/public_html').mkdir(parents=True, exist_ok=True)
         monitored = self.work / 'webroots'
         monitored.write_text(configured.format(expected=expected))
-        return self.run_shell(f'CHECK_DIRECTADMIN_WEBROOTS=1\nDIRECTADMIN_HOME={Q(str(home))}\nLMD_MONITOR_LIST={Q(str(monitored))}\n_lmd_check_webroots')
+        original = monitored.read_bytes()
+        output = self.run_shell(f'CHECK_DIRECTADMIN_WEBROOTS=1\nDIRECTADMIN_HOME={Q(str(home))}\nLMD_MONITOR_LIST={Q(str(monitored))}\n_lmd_check_webroots')
+        self.assertEqual(monitored.read_bytes(), original, 'Coverage check must not rewrite the synchronized list')
+        return output
 
     def test_coverage_equal_normalizes_trailing_slash_and_duplicates(self):
         output = self.coverage('# comment\n{expected}/\n{expected}\n')
         self.assertIn('1/1 webroots monitored', output)
+        self.assertIn('Expected: 1', output)
+        self.assertIn('Configured: 1', output)
+        self.assertIn('Missing: 0', output)
+        self.assertIn('Stale: 0', output)
         self.assertNotIn('WARNING', output)
 
     def test_coverage_same_count_different_set(self):
         output = self.coverage('/home/stale/domains/old.nl/public_html\n')
         self.assertIn('WARNING LMD realtime coverage mismatch', output)
+        self.assertIn('Expected: 1; Configured: 1; Missing: 1; Stale: 1', output)
         self.assertIn('Missing:', output)
         self.assertIn('example.nl/public_html', output)
         self.assertIn('Stale/out-of-scope entries:', output)
@@ -404,7 +412,7 @@ CHECK_LMD=0
     def test_version(self):
         result = self.main('', ['--version'])
         self.assertEqual(result.returncode, 0)
-        self.assertIn('v0.5.1', result.stdout)
+        self.assertIn('v0.5.2', result.stdout)
 
     def test_unknown_argument(self):
         self.assertEqual(self.main('', ['--unknown']).returncode, 2)

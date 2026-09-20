@@ -166,7 +166,7 @@ _lmd_check_program_updater() {
 
 _lmd_check_webroots() {
     hc_enabled "${CHECK_DIRECTADMIN_WEBROOTS:-0}" || return 0
-    local temporary actual monitored missing stale expected_count configured_count covered
+    local temporary actual monitored missing stale expected_count configured_count covered missing_count stale_count
     local list="${LMD_WEBROOT_LIST:-${LMD_MONITOR_LIST:-${LMD_DIR:-/usr/local/maldetect}/directadmin-webroots}}"
     [ -r "$list" ] || { hc_warn "LMD monitor list unavailable: $list"; return; }
     temporary="$(mktemp -d)" || { hc_status ERROR 'Cannot create coverage scratch directory'; return; }
@@ -190,14 +190,22 @@ _lmd_check_webroots() {
             ! covered="$(LC_ALL=C comm -12 "$actual" "$monitored" | wc -l)"; then
             hc_status ERROR 'LMD coverage set comparison failed'
         else
-            hc_detail "LMD realtime coverage: $((covered))/$((expected_count)) webroots monitored; configured: $((configured_count))"
+            # Counts come from the set intersection, not the difference between
+            # totals: equally sized lists can still contain different paths.
+            missing_count=$((expected_count - covered))
+            stale_count=$((configured_count - covered))
             if [ -n "$missing$stale" ]; then
-                hc_warn 'LMD realtime coverage mismatch'
-                [ -z "$missing" ] || printf '       Missing:\n%s\n' "$missing"
-                [ -z "$stale" ] || printf '       Stale/out-of-scope entries:\n%s\n' "$stale"
+                hc_warn "LMD realtime coverage mismatch (Expected: $((expected_count)); Configured: $((configured_count)); Missing: $missing_count; Stale: $stale_count)"
             else
-                hc_status PASS 'LMD realtime coverage matches DirectAdmin webroots'
+                hc_status PASS "LMD realtime coverage: $((covered))/$((expected_count)) webroots monitored"
             fi
+            hc_detail "LMD coverage counts:
+       Expected: $((expected_count))
+       Configured: $((configured_count))
+       Missing: $missing_count
+       Stale: $stale_count"
+            [ -z "$missing" ] || printf '       Missing paths:\n%s\n' "$missing"
+            [ -z "$stale" ] || printf '       Stale/out-of-scope entries:\n%s\n' "$stale"
         fi
     fi
     rm -f -- "$temporary/actual" "$temporary/monitored" "$temporary/discovered"

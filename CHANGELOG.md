@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.2 — 2026-09-20
+
+- Report expected/configured/missing/stale webroot counts from actual set
+  comparisons, including compact mismatch counts in notifications.
+- Document independent read-only coverage validation alongside the five-minute
+  DirectAdmin webroot synchronizer; the healthcheck never updates or reloads LMD.
+
 ## v0.5.1 — 2026-09-20
 
 - Parse LMD policy configuration and compatibility migrations once per check,
