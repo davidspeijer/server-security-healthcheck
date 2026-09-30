@@ -209,18 +209,35 @@ credentials are extracted or used.
 
 ### Weekly fullscan metadata and hits
 
-The primary source is `sess/scan.meta.*`, with corresponding `session.tsv.<id>`
-for hits. Cron launch output (including `/var/log/maldet/fullscan-cron.log`) does
-not prove successful completion: `maldet -b` only starts work in the background.
-No success is inferred from that log or from a report filename.
+The primary historical sources are `sess/session.index` and the corresponding
+`session.tsv.<id>`. The parser checks their identity, timestamps and common fields,
+requires TSV alert type `scan` and range `all`, and matches the configured target
+**exactly**, including its trailing slash. The `?` characters are literal data.
+Monitor sessions, recent-file scans and other paths cannot satisfy the fullscan
+check. Metadata is never evaluated or sourced, and mtime is never used for ordering.
 
-The parser reads exact `key=value` records and uses the **last** occurrence of
-repeated keys. Thus `state=running` followed by `state=completed` is completed.
-It selects only `scan.meta.*` files whose literal `path` matches the expected path
-(ignoring one trailing slash), then orders by valid completed/start epoch; file
-mtime and monitor sessions are ignored. Other-path scans cannot make the fullscan
-healthy; when no matching scan exists a WARNING includes the expected target.
-Metadata is never evaluated or sourced. Invalid/future timestamps produce warnings.
+**A native report is not proof of successful completion.** LMD 2.0.1 also writes
+index/TSV reports when a scan is interrupted. Retained `scan.meta.<id>` lifecycle
+data supplies explicit completion or running/failed status. Without completion
+evidence the report is displayed with UNKNOWN/WARNING, while detections remain
+visible. `session.last` and cron launch output are not success evidence either:
+`maldet -b` only starts work in the background.
+
+Upstream normally cleans up completed/killed/stale lifecycle metadata after
+48 hours (24-hour fallback when the setting is absent). For a weekly check with
+an eight-day maximum age, retaining lifecycle data for **14 days (336 hours)** is
+a practical operational choice: `scan_meta_cleanup_age="336"` in LMD's effective
+configuration. This keeps completion evidence; it does not change the healthcheck's
+eight-day freshness limit or recover already deleted metadata. This project does
+not change LMD configuration automatically. See the
+[source investigation](docs/LMD-NATIVE-INVESTIGATION.md) for the evidence and limits.
+
+Without an index, older installations keep the existing lifecycle-only parser.
+It reads exact `key=value` records, with the last repeated key winning. Native
+records take precedence for indexed IDs, including rejection of partial reports.
+Selection uses valid completed/start epochs; malformed or future native metadata
+warns and cannot establish completion. Native quarantine policy comes from the
+historical TSV header, not the current configuration.
 
 A completed scan requires a valid completed timestamp and must be within the age
 limit. Runtime, file count, engine, signature version, hits and quarantine policy
@@ -229,6 +246,9 @@ A recent running/started/paused scan is INFO while within its runtime limit; it
 does not count as a completion. An overdue running scan is CRITICAL. Explicitly
 failed/aborted/killed scans are CRITICAL. A new running/failed scan does not hide
 hits from the most recent completed fullscan; those findings are reported too.
+Unconfirmed native reports with hits are also reported, even if they are not the
+latest report. Missing outcome evidence cannot establish that a later clean scan
+cleared them; old unconfirmed findings can therefore remain visible.
 
 For `hits > 0`, versioned `#LMD:v1` TSV sessions are read as data. The first line is
 metadata; the first hit columns are signature, path, quarantine path, detection

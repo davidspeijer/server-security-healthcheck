@@ -267,6 +267,7 @@ _lmd_scan_details() {
         quarantine="$(awk -v text="$options" 'BEGIN {n=split(text,a,","); for(i=1;i<=n;i++) if(a[i] ~ /^quarantine_hits=/) v=substr(a[i],17); print v}')"
     fi
     hc_detail "LMD full scan ID: ${file##*/scan.meta.}; state: $state"
+    hc_detail "LMD full scan started epoch: ${started:-unknown}; ended epoch: ${completed:-unknown}"
     hc_detail "LMD full scan hits: ${hits:-unknown}"
     for value in total_files engine sig_version; do
         local field
@@ -292,12 +293,185 @@ _lmd_scan_details() {
     if [ "${LMD_EXPECT_QUARANTINE_ENABLED:-0}" != ignore ] && [ "$quarantine" != "${LMD_EXPECT_QUARANTINE_ENABLED:-0}" ]; then
         hc_warn "LMD quarantine policy mismatch: expected ${LMD_EXPECT_QUARANTINE_ENABLED:-0}, metadata $quarantine"
     fi
-    if [ "$state" = completed ] || { hc_uint "$hits" && [ "$hits" -gt 0 ]; }; then
-        _lmd_check_hits "${file%/*}/session.tsv.${file##*/scan.meta.}" "$hits" "$quarantine"
+    if [ "$state" = completed ] || [ "$state" = unknown ] || { hc_uint "$hits" && [ "$hits" -gt 0 ]; }; then
+        local session
+        session="$(_lmd_meta_get "$file" session_file)"
+        _lmd_check_hits "${session:-${file%/*}/session.tsv.${file##*/scan.meta.}}" "$hits" "$quarantine"
     fi
 }
 
+# Split literal tabs without collapsing empty columns. Caller owns lmd_fields.
+_lmd_split_tabs() {
+    local rest="${1%$'\r'}"
+    lmd_fields=()
+    while [[ "$rest" = *$'\t'* ]]; do
+        lmd_fields+=("${rest%%$'\t'*}")
+        rest="${rest#*$'\t'}"
+    done
+    lmd_fields+=("$rest")
+}
+
+_lmd_native_epoch() {
+    # Reject relative dates and timezone-free strings accepted by GNU date.
+    [[ "$1" =~ ^[A-Z][a-z]{2}[[:space:]][[:space:]0-9][0-9][[:space:]][0-9]{4}[[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}[[:space:]][+-][0-9]{4}$ ]] || return 1
+    LC_ALL=C date -d "$1" +%s 2>/dev/null
+}
+
+# Adapt persistent native records into private key=value data for the existing
+# selector. Never write to LMD's directory. Index presence is NOT success proof:
+# upstream trap_exit finalizes killed scans through the same report writer.
+_lmd_native_records() {
+    local directory="$1" scratch="$2" expected="$3" now="$4"
+    local line header id session started ended state meta value bad field
+    local -a lmd_fields row hdr
+    [ -f "$directory/session.index" ] && [ -r "$directory/session.index" ] || {
+        hc_warn 'LMD native session.index unavailable'; return;
+    }
+    IFS= read -r header < "$directory/session.index" || true
+    case "${header%$'\r'}" in
+        '#LMD_INDEX:v1'|'#LMD_INDEX:v2') ;;
+        *) hc_warn 'LMD native session.index header invalid; completion cannot be established'; return ;;
+    esac
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ "$line" = \#* || -z "$line" ]] && continue
+        _lmd_split_tabs "$line"; row=("${lmd_fields[@]}")
+        if [[ ! "${row[0]}" =~ ^[0-9]{6}-[0-9]{4}\.[0-9]+$ ]] ||
+            { [ "${#row[@]}" -ne 14 ] && [ "${#row[@]}" -ne 11 ] && [ "${#row[@]}" -ne 9 ]; }; then
+            hc_warn 'LMD malformed session.index row; selection may be incomplete'
+            continue
+        fi
+        id="${row[0]}"; meta="$scratch/scan.meta.$id"
+        # Mark all indexed IDs, including partial/monitor/invalid ones, so a
+        # lifecycle file for that ID cannot bypass native range validation.
+        if [ -e "$scratch/seen.$id" ]; then
+            hc_warn "LMD duplicate native scan ID: $id; completion unknown"
+            if [ -f "$meta" ]; then
+                printf 'state=unknown\n' >> "$meta"
+                value="$(_lmd_meta_get "$meta" hits)"
+                if hc_uint "$value" && [ "$value" -gt 0 ]; then
+                    _lmd_check_hits "$directory/session.tsv.$id" "$value" unknown
+                fi
+            fi
+            if hc_uint "${row[5]}" && [ "${row[5]}" -gt 0 ]; then
+                hc_status CRITICAL "LMD duplicate report has ${row[5]} unclassified hit(s): $id"
+            fi
+            continue
+        fi
+        : > "$scratch/seen.$id"
+        [ "${row[8]}" = "$expected" ] || continue
+        session="$directory/session.tsv.$id"
+        if [ ! -f "$session" ] || [ ! -r "$session" ]; then
+            hc_warn "LMD native session TSV unavailable: $id"
+            if hc_uint "${row[5]}" && [ "${row[5]}" -gt 0 ]; then
+                hc_status CRITICAL "LMD full scan reports ${row[5]} hit(s), but session details are unavailable: $session"
+            fi
+            continue
+        fi
+        IFS= read -r header < "$session" || true
+        _lmd_split_tabs "$header"; hdr=("${lmd_fields[@]}")
+        if [ "${#hdr[@]}" -ne 19 ] || [ "${hdr[0]}" != '#LMD:v1' ]; then
+            hc_warn "LMD native session header invalid: $id"
+            if hc_uint "${row[5]}" && [ "${row[5]}" -gt 0 ]; then
+                hc_status CRITICAL "LMD invalid native report has ${row[5]} unclassified hit(s): $id"
+            fi
+            continue
+        fi
+        if [ "${hdr[1]}" != scan ] || [ "${hdr[5]}" != all ]; then
+            hc_detail "LMD excluded monitor/partial session: $id"
+            continue
+        fi
+        bad=0
+        [ "${hdr[2]}" = "$id" ] && [ "${hdr[4]}" = "$expected" ] || bad=1
+        started="$(_lmd_native_epoch "${hdr[6]}" || true)"
+        ended="$(_lmd_native_epoch "${hdr[7]}" || true)"
+        if ! hc_uint "$started" || ! hc_uint "$ended" ||
+            [ "$started" -eq 0 ] || [ "$ended" -lt "$started" ] || [ "$ended" -gt "$now" ]; then bad=1; fi
+        [ "$started" = "${row[1]}" ] && [ "${hdr[6]}" = "${row[2]}" ] &&
+            [ "${hdr[8]}" = "${row[3]}" ] && [ "${hdr[10]}" = "${row[4]}" ] &&
+            [ "${hdr[11]}" = "${row[5]}" ] && [ "${hdr[12]}" = "${row[6]}" ] || bad=1
+        for field in 8 9 10 11 12; do hc_uint "${hdr[field]}" || bad=1; done
+        hc_uint "${row[7]}" || bad=1
+        if hc_uint "$started" && hc_uint "$ended" && hc_uint "${hdr[8]}"; then
+            [ "$((ended - started))" -eq "${hdr[8]}" ] || bad=1
+        fi
+        if [ "${#row[@]}" -ge 11 ]; then
+            [ "${hdr[14]}" = "${row[9]}" ] && [ "${hdr[17]}" = "${row[10]}" ] || bad=1
+        fi
+        if [ "${#row[@]}" -eq 14 ]; then
+            [ "${hdr[7]}" = "${row[11]}" ] && [ "${hdr[16]}" = "${row[12]}" ] &&
+                [ "${hdr[15]}" = "${row[13]}" ] || bad=1
+        fi
+        case "${hdr[16]}" in clamav|native) ;; *) bad=1 ;; esac
+        [[ "${hdr[14]}" =~ ^[0-9]+$ ]] || bad=1
+        case "${hdr[17]}" in 0|1) ;; *) bad=1 ;; esac
+        value="$(awk 'NR>1 && !/^#/ && NF {n++} END {print n+0}' "$session")"
+        if [ "$value" != "${hdr[11]}" ]; then
+            hc_status CRITICAL "LMD native hit details incomplete: header=${hdr[11]}, records=$value; $id"
+            bad=1
+        fi
+        if [ "$bad" -ne 0 ]; then
+            hc_warn "LMD native metadata invalid/inconsistent: $id; completion unknown"
+            # Never let malformed dates/identity/counts erase reported findings.
+            if { hc_uint "${row[5]}" && [ "${row[5]}" -gt 0 ]; } ||
+                { hc_uint "${hdr[11]}" && [ "${hdr[11]}" -gt 0 ]; }; then
+                hc_status CRITICAL "LMD invalid native report contains unclassified detections: $id"
+            fi
+            continue
+        fi
+        state=unknown
+        if [ -f "$directory/scan.meta.$id" ] && [ -r "$directory/scan.meta.$id" ]; then
+            value="$(_lmd_meta_get "$directory/scan.meta.$id" path)"
+            if [ "$value" = "$expected" ]; then
+                state="$(_lmd_meta_get "$directory/scan.meta.$id" state)"
+                if [ "$state" = completed ]; then
+                    value="$(_lmd_meta_get "$directory/scan.meta.$id" completed)"
+                    if ! hc_uint "$value" || [ "$value" -lt "$ended" ] || [ "$value" -gt "$now" ]; then
+                        state=unknown
+                    fi
+                    value="$(_lmd_meta_get "$directory/scan.meta.$id" started)"
+                    if ! hc_uint "$value" || [ "$value" -lt "$started" ] || [ "$value" -gt "$ended" ]; then
+                        state=unknown
+                    fi
+                fi
+            fi
+        fi
+        printf 'path=%s\nstarted=%s\ncompleted=%s\nelapsed=%s\ntotal_files=%s\nhits=%s\nengine=%s\nsig_version=%s\nquarantine_enabled=%s\nstate=%s\nsession_file=%s\n' \
+            "$expected" "$started" "$ended" "${hdr[8]}" "${hdr[10]}" "${hdr[11]}" \
+            "${hdr[16]}" "${hdr[14]}" "${hdr[17]}" "$state" "$session" > "$meta"
+        if [ "$state" != completed ] && [ "${hdr[11]}" -gt 0 ]; then
+            hc_detail "LMD findings from unconfirmed/failed native scan $id:"
+            _lmd_check_hits "$session" "${hdr[11]}" "${hdr[17]}"
+        fi
+    done < "$directory/session.index"
+}
+
 _lmd_check_fullscan() {
+    local original="${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}"
+    local scratch file id
+    # Preserve the legacy-only path for older installations. A native index
+    # always takes precedence over lifecycle records for the same scan ID.
+    if [ ! -e "$original/session.index" ]; then
+        _lmd_select_fullscan
+        return
+    fi
+    scratch="$(mktemp -d)" || { hc_status ERROR 'Cannot create LMD metadata scratch directory'; return; }
+    _lmd_native_records "$original" "$scratch" "${LMD_EXPECTED_FULLSCAN_PATH:-/home/?/domains/?/public_html/}" "$(date +%s)"
+    for file in "$original"/scan.meta.*; do
+        [ -f "$file" ] && [ -r "$file" ] || continue
+        id="${file##*/scan.meta.}"
+        [ ! -e "$scratch/seen.$id" ] || continue
+        if ! cat -- "$file" > "$scratch/scan.meta.$id"; then
+            hc_status ERROR 'Cannot copy LMD lifecycle metadata'; continue
+        fi
+        printf '\nsession_file=%s\n' "$original/session.tsv.$id" >> "$scratch/scan.meta.$id"
+    done
+    local LMD_SESSION_DIR="$scratch"
+    _lmd_select_fullscan
+    rm -f -- "$scratch"/scan.meta.* "$scratch"/seen.*
+    rmdir -- "$scratch" || hc_status ERROR 'Could not remove LMD metadata scratch directory'
+}
+
+_lmd_select_fullscan() {
     local directory="${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}"
     local expected="${LMD_EXPECTED_FULLSCAN_PATH:-/home/?/domains/?/public_html/}"
     local file path started completed order state latest='' latest_order=0 latest_completed='' completed_order=0
@@ -305,13 +479,12 @@ _lmd_check_fullscan() {
     now="$(date +%s)"
     max_age="${LMD_FULLSCAN_MAX_AGE_HOURS:-$(( ${FULLSCAN_MAX_AGE_DAYS:-8} * 24 ))}"
     [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || { hc_warn "LMD full scan session directory unavailable: $directory"; return; }
-    # Filename mtime is deliberately ignored. Literal path equality (apart from
-    # trailing slash) prevents a monitor/partial scan from satisfying fullscan health.
+    # Filename mtime is deliberately ignored. The configured target is literal.
     for file in "$directory"/scan.meta.*; do
         [ -e "$file" ] || continue
         [ -f "$file" ] && [ -r "$file" ] || { invalid=$((invalid + 1)); continue; }
         path="$(_lmd_meta_get "$file" path)"
-        if [ "${path%/}" != "${expected%/}" ]; then mismatched=$((mismatched + 1)); continue; fi
+        if [ "$path" != "$expected" ]; then mismatched=$((mismatched + 1)); continue; fi
         started="$(_lmd_meta_get "$file" started)" completed="$(_lmd_meta_get "$file" completed)"
         state="$(_lmd_meta_get "$file" state)"
         if ! hc_uint "$started" || [ "$started" -eq 0 ] || [ "$started" -gt "$now" ]; then invalid=$((invalid + 1)); continue; fi
@@ -348,6 +521,11 @@ _lmd_check_fullscan() {
             fi ;;
         failed|aborted|killed|error|cancelled|canceled)
             hc_status CRITICAL "LMD latest full scan explicitly $state" ;;
+        unknown)
+            hc_warn 'LMD native full scan completion UNKNOWN: index/TSV also exist for interrupted scans'
+            if hc_uint "$completed" && [ "$completed" -le "$now" ] && [ "$((now - completed))" -gt "$((max_age * 3600))" ]; then
+                hc_warn 'LMD native full scan report stale'
+            fi ;;
         *) hc_warn "LMD latest full scan not completed: state ${state:-unknown}" ;;
     esac
     _lmd_scan_details "$latest" "$state"

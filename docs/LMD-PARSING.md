@@ -12,14 +12,48 @@ validating an unsigned decimal integer (no leading zeros except zero, <=12 digit
 This also prevents Bash arithmetic from interpreting injected variable/subscript
 expressions. Invalid timestamps do not fall back to file mtime.
 
-Only `scan.meta.*` regular files enter selection. Matching uses literal path
-identity after removing one trailing slash; `?` in LMD's target is data, not an
-expanded shell glob. Maximum valid completed epoch wins for completed scans;
+When `session.index` exists, `_lmd_native_records` reads its 14-field v2 rows
+(also accepting older 9/11-field rows) and the corresponding 19-field `#LMD:v1`
+TSV headers. Tab splitting preserves empty columns. IDs must have the native
+numeric shape before being used in paths. Duplicate IDs warn and invalidate
+completion for that record. Only `scan` / `all` records for the exact configured
+target enter selection; `?` is literal and trailing slashes are significant.
+Index/header common fields must agree. Absolute English dates with numeric
+timezone offsets are parsed using GNU date under the C locale; relative dates,
+invalid/future timestamps and inconsistent runtimes do not establish completion.
+The TSV header supplies engine, signature version and historical quarantine policy.
+Missing TSV files cannot establish success, even for zero-hit index rows.
+
+Native data is normalized into a private `mktemp` directory for the existing
+selector, then removed. No LMD file is modified. Indexed IDs suppress fallback
+to their lifecycle file, including when their native report is invalid or partial.
+Unindexed lifecycle files remain eligible for running/failed status. With no
+index the original lifecycle-only path remains available for compatibility.
+This legacy path cannot independently verify the TSV range/type for clean scans.
+
+Index/TSV finalization is **not** successful completion: upstream's abort handler
+also writes both. A matching lifecycle file must explicitly say `completed` with
+a valid start inside the native scan interval and a completion epoch no earlier
+than the native end and no later than now. Native end time determines freshness;
+lifecycle finalization can occur later, after alert dispatch. Missing completion
+evidence gives UNKNOWN/WARNING. An explicit running/failed state remains visible.
+Unconfirmed native reports with hits are checked independently of selection so a
+newer zero-hit report cannot erase unresolved findings. This can retain old
+unconfirmed findings after lifecycle cleanup. Invalid reports with nonzero counts
+produce unclassified critical findings. Native hit-row counts are checked even
+when the header claims zero hits.
+
+See [the pinned 2.0.1 source investigation](LMD-NATIVE-INVESTIGATION.md) for layouts,
+abort behavior, cleanup and the limits of durable completion evidence. Retaining
+lifecycle metadata for 336 hours is a practical option for the default 192-hour
+freshness threshold; this project never changes that LMD setting itself.
+
+Maximum valid completed epoch wins for completed scans;
 otherwise the started epoch orders the session. Equal epochs break ties by the
 last filename encountered in shell glob order. Matching files with invalid starts
 are excluded with a warning so they cannot silently overwrite trustworthy evidence.
 The previous completed scan is retained for hit reporting when the selected scan
-is running or failed. Other scan targets are not fullscan candidates.
+is running, failed or unknown. Other scan targets are not fullscan candidates.
 
 A metadata file with a completed state but no valid completion epoch remains a
 candidate using its start time and reports a warning if selected. The parser is

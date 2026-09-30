@@ -927,5 +927,225 @@ _lmd_check_configuration
         self.assertLess(len(output), 4096)
 
 
+class NativeLmdTests(unittest.TestCase):
+    run_shell = HealthcheckTests.run_shell
+
+    def setUp(self):
+        HealthcheckTests.setUp(self)
+        self.scan.unlink()
+        self.index = self.lmd / 'sess/session.index'
+        self.row = (FIXTURES / 'session.index.native').read_text().splitlines()[1].split('\t')
+        self.header = (FIXTURES / 'session.native.tsv').read_text().strip().split('\t')
+        self.save()
+
+    def save(self, hits=''):
+        self.index.write_text('#LMD_INDEX:v2\n' + '\t'.join(self.row) + '\n')
+        self.session = self.lmd / ('sess/session.tsv.' + self.row[0])
+        self.session.write_text('\t'.join(self.header) + '\n' + hits)
+
+    def completion(self, state='completed'):
+        self.scan = self.lmd / ('sess/scan.meta.' + self.row[0])
+        self.scan.write_text(f'path={self.row[8]}\nstarted={self.row[1]}\n'
+                             f'completed={int(self.row[1])+int(self.row[3])}\nstate={state}\n')
+
+    def fullscan(self, config=''):
+        return self.run_shell('LMD_EXPECT_QUARANTINE_ENABLED=1\n' + config + '\n_lmd_check_fullscan\n')
+
+    def dates(self, started, ended):
+        from datetime import datetime, timezone
+        def hr(epoch):
+            return datetime.fromtimestamp(epoch, timezone.utc).strftime('%b %d %Y %H:%M:%S %z')
+        self.row[1:4] = [str(started), hr(started), str(ended-started)]
+        self.row[11] = hr(ended)
+        self.header[6:9] = [hr(started), hr(ended), str(ended-started)]
+
+    def detection(self, signature='php.backdoor.example'):
+        self.row[5] = self.header[11] = '1'
+        return f'{signature}\t/home/example/file.php\t-\tHEX\tmalware\troot\t644\t12\t0\t-\t-\n'
+
+    def newer(self, state='running'):
+        id = '260920-0959.999'
+        path = self.lmd / ('sess/scan.meta.' + id)
+        path.write_text(f'path={self.row[8]}\nstarted={NOW-60}\nstate={state}\n')
+
+    def test_recent_success_with_completion_evidence(self):
+        self.completion()
+        output = self.fullscan()
+        self.assertIn('PASS LMD weekly full scan completed', output)
+        self.assertIn('PASS LMD full scan: no hits', output)
+        self.assertIn('engine: clamav', output)
+        self.assertIn('sig_version: 2026052490478', output)
+        self.assertIn('871289', output)
+        self.assertNotIn('WARNING', output)
+        self.assertNotIn('CRITICAL', output)
+
+    def test_finalized_report_is_not_completion_proof(self):
+        output = self.fullscan()
+        self.assertIn('completion UNKNOWN', output)
+        self.assertNotIn('PASS LMD weekly full scan completed', output)
+        self.assertNotIn('no matching full scan metadata', output)
+
+    def test_killed_report_cannot_be_success_before_or_after_cleanup(self):
+        self.completion('killed')
+        self.assertIn('explicitly killed', self.fullscan())
+        self.scan.unlink()
+        self.assertIn('completion UNKNOWN', self.fullscan())
+
+    def test_stale_success(self):
+        self.dates(NOW-10*86400, NOW-9*86400)
+        self.save()
+        self.completion()
+        self.assertIn('completed full scan stale', self.fullscan())
+
+    def test_stale_unconfirmed_report(self):
+        self.dates(NOW-10*86400, NOW-9*86400)
+        self.save()
+        self.assertIn('native full scan report stale', self.fullscan())
+
+    def test_exact_literal_path(self):
+        for target in ['/home/a/domains/b/public_html/', '/home/*/domains/*/public_html/',
+                       '/home/?/domains/?/public_html', '/tmp']:
+            with self.subTest(target=target):
+                self.row[8] = self.header[4] = target
+                self.save()
+                self.assertIn('no matching full scan metadata', self.fullscan())
+
+    def test_monitor_and_recent_range_excluded_even_with_completed_lifecycle(self):
+        for alert, days in [('monitor', 'all'), ('scan', '7'), ('scan', '-')]:
+            with self.subTest(alert=alert, days=days):
+                self.header[1], self.header[5] = alert, days
+                self.save()
+                self.completion()
+                output = self.fullscan()
+                self.assertIn('excluded monitor/partial', output)
+                self.assertNotIn('PASS LMD weekly full scan completed', output)
+
+    def test_future_or_malformed_dates(self):
+        for start, end in [(NOW+1, NOW+60), (NOW-60, NOW+60)]:
+            self.dates(start, end)
+            self.save()
+            self.completion()
+            output = self.fullscan()
+            self.assertIn('metadata invalid/inconsistent', output)
+            self.assertNotIn('PASS LMD weekly full scan completed', output)
+        self.header[6] = 'tomorrow'
+        self.save()
+        self.assertIn('metadata invalid/inconsistent', self.fullscan())
+
+    def test_index_malformed(self):
+        for text in ['#LMD_INDEX:v2\nbroken\n', '#LMD_INDEX:v99\n' + '\t'.join(self.row) + '\n']:
+            self.index.write_text(text)
+            output = self.fullscan()
+            self.assertIn('WARNING', output)
+            self.assertNotIn('PASS LMD weekly full scan completed', output)
+
+    def test_missing_tsv_even_when_zero_hits(self):
+        self.completion()
+        self.session.unlink()
+        output = self.fullscan()
+        self.assertIn('native session TSV unavailable', output)
+        self.assertNotIn('PASS LMD weekly full scan completed', output)
+
+    def test_missing_tsv_with_hits(self):
+        self.save(self.detection())
+        self.session.unlink()
+        self.assertIn('CRITICAL LMD full scan reports 1 hit', self.fullscan())
+
+    def test_malware_and_eicar(self):
+        self.save(self.detection())
+        self.assertIn('CRITICAL LMD full scan found malware', self.fullscan())
+        self.save(self.detection('test.eicar.1040'))
+        output = self.fullscan()
+        self.assertIn('EICAR/test detections', output)
+        self.assertNotIn('CRITICAL', output)
+
+    def test_new_running_and_failed_do_not_hide_completed_hits(self):
+        self.save(self.detection())
+        self.completion()
+        for state in ['running', 'failed']:
+            self.newer(state)
+            output = self.fullscan()
+            self.assertIn('CRITICAL LMD full scan found malware', output)
+            self.assertIn('previous completed scan findings', output)
+
+    def test_new_running_does_not_hide_unconfirmed_hits(self):
+        self.save(self.detection())
+        self.newer()
+        self.assertIn('CRITICAL LMD full scan found malware', self.fullscan())
+
+    def test_latest_completion_selected_by_metadata_not_mtime_or_index_order(self):
+        oldrow = self.row.copy()
+        self.completion()
+        oldsession = self.session
+        self.row[0] = self.header[2] = '260920-0900.888'
+        self.dates(NOW-120, NOW-60)
+        self.save()
+        self.completion()
+        with self.index.open('a') as file:
+            file.write('\t'.join(oldrow) + '\n')
+        os.utime(oldsession, (NOW+99999, NOW+99999))
+        output = self.fullscan()
+        self.assertIn('ID: 260920-0900.888', output)
+        self.assertNotIn('ID: ' + oldrow[0], output)
+
+    def test_old_index_rows_use_complete_tsv_fields(self):
+        self.completion()
+        for columns in [9, 11]:
+            self.index.write_text('#LMD_INDEX:v1\n' + '\t'.join(self.row[:columns]) + '\n')
+            self.assertIn('PASS LMD weekly full scan completed', self.fullscan())
+
+    def test_empty_column_keeps_following_fields_in_place(self):
+        self.header[3] = ''
+        self.save()
+        self.completion()
+        self.assertIn('PASS LMD weekly full scan completed', self.fullscan())
+
+    def test_index_header_mismatch_fails_closed(self):
+        self.row[4] = '999'
+        self.save()
+        self.completion()
+        self.assertIn('metadata invalid/inconsistent', self.fullscan())
+
+    def test_duplicate_id_is_not_success(self):
+        self.completion()
+        with self.index.open('a') as file:
+            file.write('\t'.join(self.row) + '\n')
+        output = self.fullscan()
+        self.assertIn('duplicate native scan ID', output)
+        self.assertNotIn('PASS LMD weekly full scan completed', output)
+
+    def test_native_data_is_not_executed(self):
+        marker = self.work / 'injected'
+        self.header[16] = self.row[12] = f'$(touch {marker})'
+        self.save()
+        self.assertIn('metadata invalid/inconsistent', self.fullscan())
+        self.assertFalse(marker.exists())
+        self.row[0] = '../escape'
+        self.index.write_text('#LMD_INDEX:v2\n' + '\t'.join(self.row) + '\n')
+        self.assertIn('malformed session.index row', self.fullscan())
+
+    def test_historical_quarantine_policy(self):
+        self.completion()
+        self.assertIn('quarantine policy mismatch', self.fullscan('LMD_EXPECT_QUARANTINE_ENABLED=0'))
+
+    def test_zero_hit_header_cannot_hide_hit_rows(self):
+        self.session.write_text(self.session.read_text() + 'malware\t/home/file\t-\tHEX\tmalware\n')
+        self.completion()
+        output = self.fullscan()
+        self.assertIn('CRITICAL LMD native hit details incomplete', output)
+        self.assertNotIn('PASS LMD weekly full scan completed', output)
+
+    def test_new_unconfirmed_clean_report_cannot_hide_old_hits(self):
+        self.save(self.detection())
+        oldrow = self.row.copy()
+        self.row[0] = self.header[2] = '260920-0900.888'
+        self.row[5] = self.header[11] = '0'
+        self.dates(NOW-120, NOW-60)
+        self.save()
+        with self.index.open('a') as file:
+            file.write('\t'.join(oldrow) + '\n')
+        self.assertIn('CRITICAL LMD full scan found malware', self.fullscan())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
