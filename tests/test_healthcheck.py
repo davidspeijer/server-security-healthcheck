@@ -664,6 +664,86 @@ systemctl() {{ if [ "$1" = cat ]; then command cat {Q(str(self.policy_unit))}; e
         self.assertIn('PASS LMD fullscan cron definition matches', output)
         self.assertIn('PASS LMD effective MONITOR_MODE matches', output)
 
+    def retention_value(self, value):
+        with (self.lmd / 'conf.maldet').open('a') as file:
+            file.write(f'\nscan_meta_cleanup_age="{value}"\n')
+
+    def test_retention_boundary_and_disabled_cleanup(self):
+        self.policy_setup()
+        for value in ['48', '192', '215', '216', '336', '0']:
+            with self.subTest(value=value):
+                self.retention_value(value)
+                output = self.policy()
+                if value in ['48', '192', '215']:
+                    self.assertIn(f'WARNING LMD runtime scan_meta_cleanup_age={value}h', output)
+                    self.assertIn('below required 216h', output)
+                else:
+                    self.assertNotIn('WARNING', output)
+                    self.assertIn(f'PASS LMD runtime scan_meta_cleanup_age={value}', output)
+                if value == '0':
+                    self.assertIn('lifecycle cleanup disabled', output)
+
+    def test_retention_uses_age_alias_precedence_and_custom_margin(self):
+        self.policy_setup()
+        self.retention_value('250')
+        self.assertIn('below required 264h', self.policy('FULLSCAN_MAX_AGE_DAYS=10'))
+        self.assertNotIn('WARNING', self.policy('FULLSCAN_MAX_AGE_DAYS=10\nLMD_FULLSCAN_MAX_AGE_HOURS=192'))
+        self.assertIn('below required 264h', self.policy('LMD_FULLSCAN_MAX_AGE_HOURS=240'))
+        self.assertIn('below required 264h', self.policy('LMD_FULLSCAN_RETENTION_MARGIN_HOURS=72'))
+
+    def test_retention_missing_or_empty_uses_upstream_fallback(self):
+        self.policy_setup()
+        config = self.lmd / 'conf.maldet'
+        config.write_text('\n'.join(line for line in config.read_text().splitlines()
+                                    if not line.startswith('scan_meta_cleanup_age=')) + '\n')
+        self.assertIn('scan_meta_cleanup_age=24h (LMD 2.0.1 fallback', self.policy())
+        self.retention_value('')
+        self.assertIn('scan_meta_cleanup_age=24h (LMD 2.0.1 fallback', self.policy())
+
+    def test_retention_invalid_values_and_shell_injection_are_unknown(self):
+        self.policy_setup()
+        marker = self.work / 'retention injection'
+        for value in ['-1', 'abc', '1.5', '0336', '9999999999999', f'$(touch {marker})', 'x[0]']:
+            with self.subTest(value=value):
+                self.retention_value(value)
+                self.assertIn('WARNING LMD runtime scan_meta_cleanup_age UNKNOWN', self.policy())
+                self.assertFalse(marker.exists())
+
+    def test_retention_resolves_runtime_and_daily_overrides(self):
+        self.policy_setup()
+        self.retention_value('48')
+        (self.lmd / 'internals/compat.conf').write_text('scan_meta_cleanup_age="336"\n')
+        self.assertNotIn('WARNING', self.policy())
+        with self.policy_sysconfig.open('a') as file:
+            file.write('scan_meta_cleanup_age="400"\n')
+        with (self.lmd / 'cron/conf.maldet.cron').open('a') as file:
+            file.write('scan_meta_cleanup_age="48"\n')
+        output = self.policy()
+        self.assertIn('PASS LMD runtime scan_meta_cleanup_age=400h', output)
+        self.assertIn('WARNING LMD daily scan_meta_cleanup_age=48h', output)
+        with (self.lmd / 'cron/conf.maldet.cron').open('a') as file:
+            file.write('scan_meta_cleanup_age="0"\n')
+        self.assertNotIn('WARNING', self.policy())
+
+    def test_retention_unknown_overlay_does_not_assume_safe_base(self):
+        self.policy_setup()
+        with self.policy_sysconfig.open('a') as file:
+            file.write('scan_meta_cleanup_age="$RETENTION"\n')
+        self.assertIn('WARNING LMD runtime scan_meta_cleanup_age UNKNOWN', self.policy())
+
+    def test_retention_skipped_when_policy_check_disabled(self):
+        self.policy_setup()
+        self.retention_value('48')
+        self.assertNotIn('scan_meta_cleanup_age', self.policy('LMD_CONFIG_CHECK_ENABLED=0'))
+
+    def test_retention_margin_configuration_validation(self):
+        self.assertEqual(self.main('LMD_FULLSCAN_RETENTION_MARGIN_HOURS=48\n').returncode, 0)
+        for value in ['0', '-1', 'abc', '1.5']:
+            with self.subTest(value=value):
+                result = self.main(f'LMD_FULLSCAN_RETENTION_MARGIN_HOURS={value}\n')
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('must be a positive decimal integer', result.stdout)
+
     def compat_get(self, content, key, base=''):
         self.policy_setup()
         with (self.lmd / 'conf.maldet').open('a') as file:

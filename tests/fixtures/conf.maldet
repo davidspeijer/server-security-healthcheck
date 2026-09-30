@@ -6,6 +6,8 @@ autoupdate_signatures="1"
 sigup_interval="6"
 autoupdate_version="1"
 cron_prune_days="21"
+# Added retention policy for weekly healthcheck evidence; not an upstream default.
+scan_meta_cleanup_age="336"
 import_config_url=""
 scan_workers="auto"
 scan_clamscan="auto"

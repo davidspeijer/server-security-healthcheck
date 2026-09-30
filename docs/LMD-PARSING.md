@@ -132,6 +132,17 @@ files are written. The same parser serves cached and standalone lookups, preserv
 missing/empty/dynamic distinctions, whole-file structural errors and last-assignment
 precedence.
 
+Lifecycle retention uses that snapshot and the existing effective-value resolver
+for both runtime and daily contexts. It requires `scan_meta_cleanup_age` to be
+at least the resolved fullscan age limit plus `LMD_FULLSCAN_RETENTION_MARGIN_HOURS`
+(24 hours by default, positive integer). An exact zero disables LMD cleanup and
+passes. Missing/empty effective values use upstream 2.0.1's `${scan_meta_cleanup_age:-24}`
+fallback; malformed or unresolved values warn as UNKNOWN without printing their
+contents. Validate unsigned decimal values before arithmetic. Runtime precedence
+is base, compatibility, environment; daily additionally applies the cron override.
+These are statically configured contexts, not proof of live process configuration;
+the existing daily/cron recognizers separately diagnose unsupported execution paths.
+
 The compatibility overlay uses a separate bounded parser for the standard LMD
 legacy fallback blocks and the 2.0.1 hex-depth/worker migrations. It resolves
 literal base values and earlier migrations in file order, without sourcing the

@@ -66,6 +66,10 @@ LMD_UPDATE_FAILURE_LOOKBACK_HOURS=48
 
 # Weekly full scan: 8 days allows one day's margin.
 LMD_FULLSCAN_MAX_AGE_HOURS=192
+# Policy minimum: fullscan age + this margin (192 + 24 = 216 hours).
+# Configure LMD separately: scan_meta_cleanup_age=336 is recommended;
+# 0 disables LMD lifecycle cleanup and also satisfies the retention check.
+LMD_FULLSCAN_RETENTION_MARGIN_HOURS=24
 LMD_FULLSCAN_MAX_RUNTIME_HOURS=12
 LMD_EXPECTED_FULLSCAN_PATH="/home/?/domains/?/public_html/"
 # Legacy FULLSCAN_MAX_AGE_DAYS is used if the new hours setting is absent.

@@ -124,6 +124,7 @@ overrides from untrusted users in a privileged wrapper.
 | `LMD_UPDATE_FAILURE_LOOKBACK_HOURS` | `48` | Recent signature/program failure window |
 | `LMD_PROGRAM_UPDATE_EXPECTED` | `disabled` | `enabled`, `disabled`, `ignore` |
 | `LMD_FULLSCAN_MAX_AGE_HOURS` | `FULLSCAN_MAX_AGE_DAYS × 24`, otherwise `192` | Weekly completion age, including one day margin |
+| `LMD_FULLSCAN_RETENTION_MARGIN_HOURS` | `24` | Positive extra hours required for lifecycle retention above the fullscan age limit |
 | `LMD_FULLSCAN_MAX_RUNTIME_HOURS` | `12` | Completed duration / running scan limit |
 | `LMD_EXPECTED_FULLSCAN_PATH` | `/home/?/domains/?/public_html/` | Literal LMD scan target |
 | `LMD_WEBROOT_LIST` | `LMD_MONITOR_LIST`, otherwise `$LMD_DIR/directadmin-webroots` | Realtime configured paths |
@@ -233,6 +234,16 @@ configuration. This keeps completion evidence; it does not change the healthchec
 eight-day freshness limit or recover already deleted metadata. This project does
 not change LMD configuration automatically. See the
 [source investigation](docs/LMD-NATIVE-INVESTIGATION.md) for the evidence and limits.
+
+The configuration policy check warns when `scan_meta_cleanup_age` is below
+`LMD_FULLSCAN_MAX_AGE_HOURS + LMD_FULLSCAN_RETENTION_MARGIN_HOURS` (default
+192 + 24 = **216 hours**). Equality passes; `0` also passes because it disables
+lifecycle cleanup. The legacy `FULLSCAN_MAX_AGE_DAYS` age fallback is respected.
+Both configured runtime and daily contexts are checked with the existing override
+precedence: another scan can trigger cleanup of weekly scan metadata. Missing or
+empty settings use the LMD 2.0.1 24-hour fallback; invalid/dynamic/unreadable values
+warn as UNKNOWN. This check is included in `LMD_CONFIG_CHECK_ENABLED` and reuses
+the read-only configuration snapshot. It does not change retention or scan status.
 
 Without an index, older installations keep the existing lifecycle-only parser.
 It reads exact `key=value` records, with the last repeated key winning. Native

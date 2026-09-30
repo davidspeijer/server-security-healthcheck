@@ -415,6 +415,39 @@ _lmd_check_monitor_config() {
     else hc_warn 'LMD effective MONITOR_MODE differs from expected monitor target'; fi
 }
 
+_lmd_check_retention() {
+    local max_age="${LMD_FULLSCAN_MAX_AGE_HOURS:-}" days="${FULLSCAN_MAX_AGE_DAYS:-8}"
+    local margin="${LMD_FULLSCAN_RETENTION_MARGIN_HOURS:-24}" minimum scope value status origin
+    if [ -z "$max_age" ]; then
+        hc_uint "$days" && [ "$days" -gt 0 ] || { hc_status ERROR 'LMD fullscan age limit invalid'; return; }
+        max_age=$((days * 24))
+    fi
+    if ! hc_uint "$max_age" || [ "$max_age" -eq 0 ] || ! hc_uint "$margin" || [ "$margin" -eq 0 ]; then
+        hc_status ERROR 'LMD fullscan age limit or retention margin invalid'; return
+    fi
+    minimum=$((max_age + margin))
+    # Cleanup can run during other non-hook scans too. Resolve both configured
+    # contexts so a daily override cannot silently shorten weekly scan history.
+    for scope in runtime daily; do
+        origin='configured'
+        value="$(_lmd_effective_config_value scan_meta_cleanup_age "$scope")"; status=$?
+        case "$status" in
+            0) ;;
+            1) value=24; origin='LMD 2.0.1 fallback (missing/empty setting)' ;;
+            *) hc_warn "LMD $scope scan_meta_cleanup_age UNKNOWN: configuration cannot be safely resolved"; continue ;;
+        esac
+        if ! hc_uint "$value"; then
+            hc_warn "LMD $scope scan_meta_cleanup_age UNKNOWN: expected unsigned decimal hours or 0; minimum ${minimum}h"
+        elif [ "$value" -eq 0 ]; then
+            hc_status PASS "LMD $scope scan_meta_cleanup_age=0: lifecycle cleanup disabled"
+        elif [ "$value" -lt "$minimum" ]; then
+            hc_warn "LMD $scope scan_meta_cleanup_age=${value}h ($origin) is below required ${minimum}h (fullscan age ${max_age}h + margin ${margin}h); completion evidence may be removed too early"
+        else
+            hc_status PASS "LMD $scope scan_meta_cleanup_age=${value}h meets minimum ${minimum}h (fullscan age ${max_age}h + margin ${margin}h)"
+        fi
+    done
+}
+
 _lmd_check_configuration() {
     hc_enabled "${LMD_CONFIG_CHECK_ENABLED:-1}" || return 0
     local root="${LMD_DIR:-/usr/local/maldetect}" sysconfig default key value expected status file
@@ -445,6 +478,7 @@ _lmd_check_configuration() {
     done
     _lmd_compat_compute "$LMD_POLICY_COMPAT"; lmd_compat_status=$?
 
+    _lmd_check_retention
     _lmd_policy_setting email_alert "${LMD_EXPECT_EMAIL_ALERT:-1}"
     _lmd_policy_setting scan_clamscan "${LMD_EXPECT_SCAN_CLAMSCAN:-auto}"
     _lmd_policy_setting quarantine_hits "${LMD_EXPECT_QUARANTINE_ENABLED:-0}"
