@@ -3,6 +3,7 @@
 HC_WARNINGS=()
 HC_DETAILS=()
 HC_ERRORS=0
+HC_ERROR_MESSAGES=()
 
 hc_warn() {
     hc_status WARNING "$1"
@@ -18,7 +19,10 @@ hc_status() {
     printf '  %s %s\n' "$level" "$message"
     case "$level" in
         WARNING|CRITICAL) HC_WARNINGS+=("$level $message") ;;
-        ERROR) HC_ERRORS=$((HC_ERRORS + 1)) ;;
+        ERROR)
+            HC_ERRORS=$((HC_ERRORS + 1))
+            HC_ERROR_MESSAGES+=("$level $message")
+            ;;
     esac
 }
 

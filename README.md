@@ -87,7 +87,9 @@ The oneshot unit explicitly contains `SuccessExitStatus=1`: findings are a
 successful execution, not a systemd failure. `UNKNOWN` appears in a WARNING when
 evidence cannot be parsed; it is not another exit code. Any application error takes
 precedence over findings in the exit status, but does not suppress notifications
-for findings from other checks.
+for findings from other checks. Execution errors reported by checks also trigger
+notifications when there are no warnings or critical findings; their messages
+are included, and exit status remains 2.
 
 ## Configuration
 
@@ -421,8 +423,14 @@ Set `NOTIFY_TELEGRAM=1` in `healthcheck.conf` and set `TELEGRAM_BOT_TOKEN` and
 sudo server-security-healthcheck --test-notification
 ```
 
-Only warnings/critical findings trigger normal notifications. Critical findings
-come first so a burst of policy warnings cannot hide them through truncation.
+Warnings, critical findings and execution errors reported by checks trigger normal
+notifications when Telegram is enabled. Critical findings come first, followed by
+execution errors and then warnings, so policy warnings cannot push errors out of
+the message through truncation. Healthy runs do not send notifications. A failed
+send leaves the notification text on stderr and returns exit status 2.
+Startup failures before notification setup (such as missing/invalid configuration
+or missing core dependencies) still return 2 with local diagnostics only. This is
+not an external watchdog for crashes or runs that never start.
 Messages are plain text, with bounded length; full diagnostics remain in CLI/systemd output. Telegram
 is the only intentional network write during a check; enable it only when sending
 these operational details is appropriate. Configured LMD secrets are never used.

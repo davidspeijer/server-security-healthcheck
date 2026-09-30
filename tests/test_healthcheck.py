@@ -567,6 +567,59 @@ notify_telegram "$long"
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertTrue(marker.exists(), 'A separate check error suppressed the malware notification')
         self.assertIn('CRITICAL LMD full scan found malware', marker.read_text())
+        self.assertIn('ERROR DirectAdmin webroot discovery failed', marker.read_text())
+
+    def error_notification_fixture(self, body, *, enabled=True, curl_status=0):
+        library = self.work / 'notification library'
+        shutil.copytree(ROOT / 'lib', library)
+        marker = self.work / 'notification curl arguments'
+        # Exercise the real notification backend without network access.
+        with (library / 'notify/telegram.sh').open('a') as file:
+            file.write('\ncurl() { printf "%s\\n" "$@" > ' + Q(str(marker)) +
+                       f'; return {curl_status}; }}\n')
+        (library / 'checks/error_fixture.sh').write_text(
+            'hc_register_check error_fixture\ncheck_error_fixture() {\n' + body + '\n}\n')
+        config = f'NOTIFY_TELEGRAM={int(enabled)}\nTELEGRAM_BOT_TOKEN=fixture\nTELEGRAM_CHAT_ID=fixture\n'
+        return self.main(config, lib_dir=library), marker
+
+    def test_error_only_sends_details_and_preserves_exit_two(self):
+        result, marker = self.error_notification_fixture(
+            'hc_status ERROR "Disk usage check failed"\nhc_status ERROR "Monitor process check failed"')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        message = marker.read_text()
+        self.assertIn('Execution errors: 2', message)
+        self.assertIn('1. ERROR Disk usage check failed', message)
+        self.assertIn('2. ERROR Monitor process check failed', message)
+        self.assertNotIn('OK all enabled checks passed', result.stdout)
+        self.assertEqual(result.stderr, '')
+
+    def test_error_notification_priority_survives_warning_burst(self):
+        result, marker = self.error_notification_fixture(
+            'local i\nfor i in {1..100}; do hc_warn "Policy warning number $i requiring investigation"; done\n'
+            'hc_status ERROR "Disk usage check failed"\nhc_status CRITICAL "Malware found"')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        message = marker.read_text()
+        self.assertIn('1. CRITICAL Malware found\n2. ERROR Disk usage check failed\n3. WARNING', message)
+        self.assertIn('Truncated', message)
+
+    def test_error_notification_failure_keeps_diagnostics(self):
+        result, marker = self.error_notification_fixture('hc_status ERROR "Disk usage check failed"', curl_status=22)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertTrue(marker.exists())
+        self.assertIn('1. ERROR Disk usage check failed', result.stderr)
+        self.assertIn('Execution errors: 1', result.stderr)
+
+    def test_error_with_notifications_disabled_does_not_send(self):
+        result, marker = self.error_notification_fixture('hc_status ERROR "Disk usage check failed"', enabled=False)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertIn('ERROR Disk usage check failed', result.stdout)
+
+    def test_healthy_run_with_notifications_enabled_does_not_send(self):
+        result, marker = self.error_notification_fixture('hc_status PASS "Fixture healthy"')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertIn('OK all enabled checks passed', result.stdout)
 
     def policy_setup(self):
         (self.lmd / 'cron').mkdir(exist_ok=True)

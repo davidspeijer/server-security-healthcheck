@@ -91,8 +91,7 @@ for check_name in "${HC_REGISTERED_CHECKS[@]}"; do
     fi
 done
 
-if [ "${#HC_WARNINGS[@]}" -eq 0 ]; then
-    [ "$HC_ERRORS" -eq 0 ] || exit 2
+if [ "${#HC_WARNINGS[@]}" -eq 0 ] && [ "$HC_ERRORS" -eq 0 ]; then
     hc_log "OK all enabled checks passed"
     exit 0
 fi
@@ -107,12 +106,11 @@ Execution errors: ${HC_ERRORS}
 "
 
 i=1
-# A burst of policy warnings must not push critical scan findings beyond the
-# notification length limit. CLI output remains in check execution order.
-for severity in CRITICAL WARNING; do
-    for item in "${HC_WARNINGS[@]}"; do
-        if [ "$severity" = CRITICAL ] && [[ "$item" != 'CRITICAL '* ]]; then continue; fi
-        if [ "$severity" = WARNING ] && [[ "$item" = 'CRITICAL '* ]]; then continue; fi
+# Prioritize critical findings, then execution errors, then policy warnings so
+# warning bursts cannot hide errors. CLI output remains in check execution order.
+for severity in CRITICAL ERROR WARNING; do
+    for item in "${HC_WARNINGS[@]}" "${HC_ERROR_MESSAGES[@]}"; do
+        [[ "$item" = "$severity "* ]] || continue
         message+="${i}. ${item}"$'\n'
         i=$((i + 1))
     done
