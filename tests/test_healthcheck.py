@@ -183,7 +183,7 @@ pgrep() {{ return 0; }}
         self.assertIn('quarantine disabled by scan policy', self.fullscan())
 
     def test_quarantine_mismatch(self):
-        self.assertIn('WARNING LMD quarantine policy mismatch', self.fullscan('LMD_EXPECT_QUARANTINE_ENABLED=1'))
+        self.assertIn('WARNING LMD historical scan quarantine mismatch', self.fullscan('LMD_EXPECT_QUARANTINE_ENABLED=1'))
 
     def test_metadata_is_not_executed(self):
         marker = self.work / 'injected'
@@ -1259,7 +1259,99 @@ class NativeLmdTests(unittest.TestCase):
 
     def test_historical_quarantine_policy(self):
         self.completion()
-        self.assertIn('quarantine policy mismatch', self.fullscan('LMD_EXPECT_QUARANTINE_ENABLED=0'))
+        self.assertIn('historical scan quarantine mismatch', self.fullscan('LMD_EXPECT_QUARANTINE_ENABLED=0'))
+
+    def expired_missing(self, age_days=23, hits=True):
+        (self.lmd / 'conf.maldet').write_text('cron_prune_days="21"\n')
+        self.dates(NOW-int(age_days*86400)-60, NOW-int(age_days*86400))
+        self.save(self.detection() if hits else '')
+        self.session.unlink()
+
+    def test_missing_tsv_outside_retention_with_and_without_historical_hits(self):
+        for hits in [False, True]:
+            with self.subTest(hits=hits):
+                self.expired_missing(hits=hits)
+                output = self.fullscan()
+                self.assertIn('TSV absent outside daily retention', output)
+                self.assertNotIn('CRITICAL', output)
+                self.assertNotIn('native session TSV unavailable', output)
+                self.assertNotIn('PASS LMD weekly full scan completed', output)
+
+    def test_retention_whole_day_boundary(self):
+        for age, expired in [(21, False), (22-1/86400, False), (22, True)]:
+            with self.subTest(age=age):
+                self.expired_missing(age_days=age)
+                output = self.fullscan()
+                self.assertEqual('TSV absent outside daily retention' in output, expired)
+                self.assertEqual('CRITICAL LMD full scan reports' in output, not expired)
+
+    def test_retention_overrides_and_unknown_config(self):
+        self.expired_missing()
+        cron = self.lmd / 'cron'
+        cron.mkdir()
+        config = cron / 'conf.maldet.cron'
+        for text in ['cron_prune_days="30"\n', 'cron_prune_days="$(touch NEVER)"\n',
+                     'cron_prune_days="-1"\n']:
+            config.write_text(text)
+            self.assertIn('CRITICAL LMD full scan reports', self.fullscan())
+        config.write_text('cron_prune_days=""\n')  # upstream fallback: 21
+        self.assertIn('outside daily retention', self.fullscan())
+        (self.lmd / 'conf.maldet').unlink()
+        self.assertIn('CRITICAL LMD full scan reports', self.fullscan())
+
+    def test_retention_does_not_hide_relevant_scan_or_lifecycle_evidence(self):
+        self.expired_missing(age_days=2)
+        (self.lmd / 'conf.maldet').write_text('cron_prune_days="0"\n')
+        self.assertIn('CRITICAL LMD full scan reports', self.fullscan())
+        self.expired_missing()
+        self.completion('running')
+        self.assertIn('CRITICAL LMD full scan reports', self.fullscan())
+
+    def test_retention_invalid_end_and_legacy_index_fail_closed(self):
+        self.expired_missing()
+        valid = self.row.copy()
+        for end in ['tomorrow', self.row[2], 'Oct 20 2099 00:00:00 +0000']:
+            self.row = valid.copy()
+            self.row[11] = end
+            self.index.write_text('#LMD_INDEX:v2\n' + '\t'.join(self.row) + '\n')
+            self.assertIn('CRITICAL LMD full scan reports', self.fullscan())
+        self.index.write_text('#LMD_INDEX:v1\n' + '\t'.join(valid[:11]) + '\n')
+        self.assertIn('CRITICAL LMD full scan reports', self.fullscan())
+
+    def test_retention_does_not_hide_existing_historical_hits(self):
+        self.expired_missing()
+        self.save(self.detection())
+        self.assertIn('CRITICAL LMD full scan found malware', self.fullscan())
+
+    def test_retention_multiple_historical_scans_keep_latest_success(self):
+        recent_row, recent_header = self.row.copy(), self.header.copy()
+        old_rows = []
+        for i in range(3):
+            self.row[0] = self.header[2] = f'260801-0030.{100+i}'
+            self.expired_missing(age_days=24+i)
+            old_rows.append(self.row.copy())
+        self.row, self.header = recent_row, recent_header
+        self.save()
+        self.completion()
+        with self.index.open('a') as file:
+            for row in old_rows:
+                file.write('\t'.join(row) + '\n')
+        output = self.fullscan()
+        self.assertEqual(output.count('TSV absent outside daily retention'), 3)
+        self.assertIn('PASS LMD weekly full scan completed', output)
+        self.assertNotIn('WARNING', output)
+        self.assertNotIn('CRITICAL', output)
+
+    def test_runtime_quarantine_zero_is_not_live_config_zero(self):
+        (self.lmd / 'conf.maldet').write_text('quarantine_hits="1"\nquarantine_on_error="0"\n')
+        self.row[10] = self.header[17] = '0'
+        self.save(self.detection())
+        self.completion()
+        output = self.fullscan()
+        self.assertIn('recorded runtime value 0 (not current configuration)', output)
+        self.assertIn('ClamAV error', output)
+        self.assertIn('CRITICAL LMD full scan found malware', output)
+        self.assertIn('detected files may still be accessible', output)
 
     def test_zero_hit_header_cannot_hide_hit_rows(self):
         self.session.write_text(self.session.read_text() + 'malware\t/home/file\t-\tHEX\tmalware\n')

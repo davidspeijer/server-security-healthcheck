@@ -21,7 +21,8 @@ target enter selection; `?` is literal and trailing slashes are significant.
 Index/header common fields must agree. Absolute English dates with numeric
 timezone offsets are parsed using GNU date under the C locale; relative dates,
 invalid/future timestamps and inconsistent runtimes do not establish completion.
-The TSV header supplies engine, signature version and historical quarantine policy.
+The TSV header supplies engine, signature version and runtime quarantine state at
+finalization. This mutable state is not necessarily the original configured policy.
 Missing TSV files cannot establish success, even for zero-hit index rows.
 
 Native data is normalized into a private `mktemp` directory for the existing
@@ -38,8 +39,12 @@ than the native end and no later than now. Native end time determines freshness;
 lifecycle finalization can occur later, after alert dispatch. Missing completion
 evidence gives UNKNOWN/WARNING. An explicit running/failed state remains visible.
 Unconfirmed native reports with hits are checked independently of selection so a
-newer zero-hit report cannot erase unresolved findings. This can retain old
-unconfirmed findings after lifecycle cleanup. Invalid reports with nonzero counts
+newer zero-hit report cannot erase unresolved findings. Existing details can retain old
+unconfirmed findings after lifecycle cleanup. Absent TSVs outside the resolved daily
+retention and fullscan relevance windows are INFO when the index end metadata is
+valid and no lifecycle file remains; they do not establish completion. The boundary
+is N+1 whole days for GNU find `-mtime +N`, using scan end metadata, never mtime.
+Unresolvable retention, malformed dates and recent missing details stay conservative. Invalid reports with nonzero counts
 produce unclassified critical findings. Native hit-row counts are checked even
 when the header claims zero hits.
 

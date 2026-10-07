@@ -249,8 +249,10 @@ Without an index, older installations keep the existing lifecycle-only parser.
 It reads exact `key=value` records, with the last repeated key winning. Native
 records take precedence for indexed IDs, including rejection of partial reports.
 Selection uses valid completed/start epochs; malformed or future native metadata
-warns and cannot establish completion. Native quarantine policy comes from the
-historical TSV header, not the current configuration.
+warns and cannot establish completion. Native runtime quarantine state comes from the
+historical TSV header, not the current configuration. LMD can change that value
+during a scan after a ClamAV error; a historical mismatch does not imply live
+configuration drift.
 
 A completed scan requires a valid completed timestamp and must be within the age
 limit. Runtime, file count, engine, signature version, hits and quarantine policy
@@ -262,6 +264,12 @@ hits from the most recent completed fullscan; those findings are reported too.
 Unconfirmed native reports with hits are also reported, even if they are not the
 latest report. Missing outcome evidence cannot establish that a later clean scan
 cleared them; old unconfirmed findings can therefore remain visible.
+An absent historical TSV outside daily retention (`cron_prune_days`, effective
+daily overlays, default 21) is INFO when valid index end metadata places it at
+least N+1 whole days ago and outside the fullscan relevance window, with no
+remaining lifecycle file. Missing recent TSVs still warn and reported hits remain
+CRITICAL. Existing detection details are never hidden by this exception.
+No file mtime is used and a pruned report never counts as successful completion.
 
 For `hits > 0`, versioned `#LMD:v1` TSV sessions are read as data. The first line is
 metadata; the first hit columns are signature, path, quarantine path, detection
@@ -282,7 +290,9 @@ from the owner at detection time. Spaces in paths are preserved; literal tabs or
 newlines in paths are not supported by these line/TSV formats.
 
 Quarantine policy comes from `quarantine_enabled` or `options`' `quarantine_hits`.
-Disabled quarantine alone is INFO. A configured policy mismatch is WARNING. For
+Disabled quarantine alone is INFO. A historical runtime mismatch is WARNING,
+explicitly separated from live configuration. LMD can disable runtime quarantine
+for ClamAV errors even with `quarantine_hits=1` in configuration. For
 non-test hits with quarantine disabled, output explicitly warns that detected
 files may still be accessible. Enabled policy or a stored quarantine path does
 not prove that remediation succeeded. This tool never quarantines or removes files.

@@ -291,7 +291,8 @@ _lmd_scan_details() {
         *) quarantine=unknown; hc_detail 'LMD automatic quarantine status unknown' ;;
     esac
     if [ "${LMD_EXPECT_QUARANTINE_ENABLED:-0}" != ignore ] && [ "$quarantine" != "${LMD_EXPECT_QUARANTINE_ENABLED:-0}" ]; then
-        hc_warn "LMD quarantine policy mismatch: expected ${LMD_EXPECT_QUARANTINE_ENABLED:-0}, metadata $quarantine"
+        hc_warn "LMD historical scan quarantine mismatch: expected ${LMD_EXPECT_QUARANTINE_ENABLED:-0}, recorded runtime value $quarantine (not current configuration)"
+        hc_detail 'LMD can disable runtime quarantine after a ClamAV error; inspect this scan and clamscan_log. Live configuration is checked separately.'
     fi
     if [ "$state" = completed ] || [ "$state" = unknown ] || { hc_uint "$hits" && [ "$hits" -gt 0 ]; }; then
         local session
@@ -317,13 +318,54 @@ _lmd_native_epoch() {
     LC_ALL=C date -d "$1" +%s 2>/dev/null
 }
 
+# Daily retention context, read as literals even when policy reporting is disabled.
+# Missing/unresolvable base configuration must never silence a missing report.
+_lmd_session_retention_days() {
+    local root="${LMD_DIR:-/usr/local/maldetect}" value status
+    local LMD_POLICY_MAIN="${LMD_CONFIG_FILE:-$root/conf.maldet}"
+    # Dynamically scoped inputs consumed by lmd_policy.sh's effective resolver.
+    # shellcheck disable=SC2034
+    local LMD_POLICY_COMPAT="${LMD_COMPAT_CONFIG_FILE:-$root/internals/compat.conf}"
+    # shellcheck disable=SC2034
+    local LMD_POLICY_CRON="${LMD_CRON_CONFIG_FILE:-$root/cron/conf.maldet.cron}"
+    local LMD_POLICY_ENV="${LMD_SYSCONFIG_FILE:-/etc/sysconfig/maldet}"
+    [ -e "$LMD_POLICY_ENV" ] || LMD_POLICY_ENV="${LMD_DEFAULT_FILE:-/etc/default/maldet}"
+    [ -f "$LMD_POLICY_MAIN" ] && [ -r "$LMD_POLICY_MAIN" ] || return 1
+    value="$(_lmd_effective_config_value cron_prune_days daily)"; status=$?
+    case "$status" in 0) ;; 1) value=21 ;; *) return 1 ;; esac
+    hc_uint "$value" || return 1
+    printf '%s' "$value"
+}
+
+# Caller owns row. Use cross-checked end metadata, never file mtime or ID dates.
+# GNU find -mtime +N first matches at N+1 whole days. Retain diagnostics for
+# scans in the healthcheck's relevance window even if daily retention is shorter.
+_lmd_missing_session_expired() {
+    local now="$1" days="$2" start end field limit
+    hc_uint "$days" && [ "${#row[@]}" -eq 14 ] || return 1
+    for field in 1 3 4 5 6 7; do hc_uint "${row[field]}" || return 1; done
+    start="$(_lmd_native_epoch "${row[2]}" || true)"
+    end="$(_lmd_native_epoch "${row[11]}" || true)"
+    hc_uint "$start" && hc_uint "$end" || return 1
+    [ "$start" = "${row[1]}" ] && [ "$start" -gt 0 ] &&
+        [ "$end" -ge "$start" ] && [ "$end" -le "$now" ] &&
+        [ "$((end - start))" -eq "${row[3]}" ] || return 1
+    limit="${FULLSCAN_MAX_AGE_DAYS:-8}"
+    hc_uint "$limit" || return 1
+    limit="${LMD_FULLSCAN_MAX_AGE_HOURS:-$((limit * 24))}"
+    hc_uint "$limit" || return 1
+    [ "$((now - end))" -ge "$(((days + 1) * 86400))" ] &&
+        [ "$((now - end))" -gt "$((limit * 3600))" ]
+}
+
 # Adapt persistent native records into private key=value data for the existing
 # selector. Never write to LMD's directory. Index presence is NOT success proof:
 # upstream trap_exit finalizes killed scans through the same report writer.
 _lmd_native_records() {
     local directory="$1" scratch="$2" expected="$3" now="$4"
-    local line header id session started ended state meta value bad field
+    local line header id session started ended state meta value bad field retention_days
     local -a lmd_fields row hdr
+    retention_days="$(_lmd_session_retention_days || true)"
     [ -f "$directory/session.index" ] && [ -r "$directory/session.index" ] || {
         hc_warn 'LMD native session.index unavailable'; return;
     }
@@ -361,6 +403,12 @@ _lmd_native_records() {
         [ "${row[8]}" = "$expected" ] || continue
         session="$directory/session.tsv.$id"
         if [ ! -f "$session" ] || [ ! -r "$session" ]; then
+            if [ ! -e "$session" ] && [ ! -L "$session" ] &&
+                [ ! -e "$directory/scan.meta.$id" ] &&
+                _lmd_missing_session_expired "$now" "$retention_days"; then
+                hc_detail "LMD historical session $id: TSV absent outside daily retention (${retention_days} days); retained index hits=${row[5]}, not current findings or completion proof"
+                continue
+            fi
             hc_warn "LMD native session TSV unavailable: $id"
             if hc_uint "${row[5]}" && [ "${row[5]}" -gt 0 ]; then
                 hc_status CRITICAL "LMD full scan reports ${row[5]} hit(s), but session details are unavailable: $session"
