@@ -35,6 +35,7 @@ class HealthcheckTests(unittest.TestCase):
         self.scan = self.lmd / 'sess/scan.meta.260920-0030.1260922'
         shutil.copyfile(FIXTURES / 'scan.meta.completed', self.scan)
         self.session = self.lmd / 'sess/session.tsv.260920-0030.1260922'
+        (self.work / 'empty audit').write_text('')
         self.env = dict(os.environ, TZ='Europe/Amsterdam', LC_ALL='C')
 
     def run_shell(self, script, expected=0, reliability=False):
@@ -45,7 +46,7 @@ source {Q(str(ROOT / 'lib/checks/lmd.sh'))}
 source {Q(str(ROOT / 'lib/checks/lmd_policy.sh'))}
 source {Q(str(ROOT / 'lib/checks/clamav.sh'))}
 LMD_DIR={Q(str(self.lmd))}
-LMD_AUDIT={Q(str(self.work / 'absent audit'))}
+LMD_AUDIT={Q(str(self.work / 'empty audit'))}
 date() {{ if [ "$*" = +%s ]; then printf '%s\\n' {NOW}; else command date "$@"; fi; }}
 systemctl() {{ return 0; }}
 pgrep() {{ return 0; }}
@@ -370,7 +371,7 @@ pgrep() {{ return 0; }}
     def clamav(self, timer=True, active=True, daemon=False, failed=False):
         script = f'''
 CHECK_CLAMAV=1
-_clamav_find_newest_db() {{ echo /fake/daily.cvd; }}
+_clamav_check_databases() {{ return 0; }}
 hc_file_age_hours() {{ echo 1; }}
 _clamav_last_success_epoch() {{ echo {NOW-3600}; }}
 hc_have() {{ return 0; }}
@@ -445,9 +446,9 @@ CHECK_LMD=0
     def test_telegram_truncates_without_sending(self):
         output = self.run_shell(f'''source {Q(str(ROOT / 'lib/notify/telegram.sh'))}
 NOTIFY_TELEGRAM=1
-TELEGRAM_BOT_TOKEN=test
-TELEGRAM_CHAT_ID=test
-curl() {{ printf '%s\\n' "$@" > {Q(str(self.work / 'curl.args'))}; }}
+TELEGRAM_BOT_TOKEN=123:fixture_token
+TELEGRAM_CHAT_ID=123
+curl() {{ cat > {Q(str(self.work / 'curl.args'))}; }}
 printf -v long '%5000s' x
 notify_telegram "$long"
 ''')
@@ -600,11 +601,11 @@ notify_telegram "$long"
         marker = self.work / 'notification curl arguments'
         # Exercise the real notification backend without network access.
         with (library / 'notify/telegram.sh').open('a') as file:
-            file.write('\ncurl() { printf "%s\\n" "$@" > ' + Q(str(marker)) +
+            file.write('\ncurl() { local input; input="$(cat)"; printf "%b" "$input" > ' + Q(str(marker)) +
                        f'; return {curl_status}; }}\n')
         (library / 'checks/error_fixture.sh').write_text(
             'hc_register_check error_fixture\ncheck_error_fixture() {\n' + body + '\n}\n')
-        config = f'NOTIFY_TELEGRAM={int(enabled)}\nTELEGRAM_BOT_TOKEN=fixture\nTELEGRAM_CHAT_ID=fixture\n'
+        config = f'NOTIFY_TELEGRAM={int(enabled)}\nTELEGRAM_BOT_TOKEN=123:fixture_token\nTELEGRAM_CHAT_ID=123\n'
         return self.main(config, lib_dir=library), marker
 
     def test_error_only_sends_details_and_preserves_exit_two(self):
@@ -664,7 +665,7 @@ notify_telegram "$long"
         self.policy_scan.write_text(f"30 0 * * 0 root /usr/bin/flock -n /var/run/maldet-fullscan.lock '{self.lmd}/maldet' -b -a '/home/?/domains/?/public_html/' >> /var/log/maldet/fullscan-cron.log 2>&1\n")
         self.policy_unit = self.work / 'maldet.service'
         self.policy_unit.write_text('[Service]\nEnvironmentFile=-/etc/sysconfig/maldet\nEnvironmentFile=-/etc/default/maldet\n'
-                                    f'ExecStart={self.lmd}/maldet --monitor ${{MONITOR_MODE}}\n')
+                                    f'ExecStart="{self.lmd}/maldet" --monitor ${{MONITOR_MODE}}\n')
         self.policy_prefix = f'''
 LMD_EXPECT_QUARANTINE_ENABLED=1
 LMD_SYSCONFIG_FILE={Q(str(self.policy_sysconfig))}
@@ -1073,11 +1074,11 @@ _lmd_check_configuration
         shutil.copytree(ROOT / 'lib', library)
         marker = self.work / 'captured curl arguments'
         with (library / 'notify/telegram.sh').open('a') as file:
-            file.write('\ncurl() { printf "%s\\n" "$@" > ' + Q(str(marker)) + '; }\n')
+            file.write('\ncurl() { local input; input="$(cat)"; printf "%b" "$input" > ' + Q(str(marker)) + '; }\n')
         (library / 'checks/notification_fixture.sh').write_text(
             'hc_register_check notification_fixture\n'
             'check_notification_fixture() { local i; for i in {1..100}; do hc_warn "Configuration policy drift in setting number $i requiring review"; done; hc_status CRITICAL "LMD full scan found malware"; }\n')
-        result = self.main('NOTIFY_TELEGRAM=1\nTELEGRAM_BOT_TOKEN=fixture\nTELEGRAM_CHAT_ID=fixture\n', lib_dir=library)
+        result = self.main('NOTIFY_TELEGRAM=1\nTELEGRAM_BOT_TOKEN=123:fixture_token\nTELEGRAM_CHAT_ID=123\n', lib_dir=library)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         output = marker.read_text()
         self.assertIn('1. CRITICAL LMD full scan found malware', output)

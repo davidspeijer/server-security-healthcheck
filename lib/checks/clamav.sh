@@ -1,29 +1,71 @@
 #!/usr/bin/env bash
 hc_register_check clamav
 
-_clamav_find_newest_db() {
-    find /var/lib/clamav /var/clamav /usr/local/share/clamav /usr/share/clamav \
-        -maxdepth 1 -type f \
-        \( -name 'daily.cvd' -o -name 'daily.cld' \
-           -o -name 'main.cvd' -o -name 'main.cld' \
-           -o -name 'bytecode.cvd' -o -name 'bytecode.cld' \) \
-        -printf '%T@ %p\n' 2>/dev/null |
-    sort -nr | head -n1 | cut -d' ' -f2-
+_clamav_database_directory() {
+    local unit='' config defaults='' directory instance service="${CLAMAV_SERVICE:-clamd@scan}"
+    if [ -z "${CLAMAV_CONFIG_FILE:-}" ]; then
+        unit="$(systemctl cat "$service" 2>/dev/null)" || return 1
+    fi
+    instance="${service#*@}"; instance="${instance%.service}"
+    config="$(hc_data_parse clam-config "${CLAMAV_CONFIG_FILE:-}" "$instance" <<< "$unit" 2>/dev/null)" || return 1
+    if directory="$(hc_data_parse database "$config" '' 2>/dev/null)"; then
+        printf '%s\n' "$directory"
+        return 0
+    fi
+    # Packaging changes the generated example name. Both names describe clamd;
+    # never use a default belonging to freshclam or another database consumer.
+    hc_have clamconf || return 1
+    local template
+    for template in clamd.conf clamd.d/scan.conf; do
+        defaults="$(clamconf -g "$template" 2>/dev/null)" || return 1
+        defaults="$(sed -n 's/^#DatabaseDirectory[[:space:]]\+//p' <<< "$defaults")"
+        [ -z "$defaults" ] || break
+    done
+    directory="$(hc_data_parse database "$config" "$defaults" 2>/dev/null)" || return 1
+    printf '%s\n' "$directory"
+}
+
+_clamav_check_databases() {
+    local directory name file found age
+    directory="$(_clamav_database_directory)" || {
+        hc_status ERROR 'ClamAV active database directory/configuration UNKNOWN'; return;
+    }
+    hc_detail "ClamAV active database directory: $directory"
+    [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || {
+        hc_status ERROR 'ClamAV active database directory unavailable/unreadable'; return;
+    }
+    # daily freshness is essential; main is a required baseline with independent
+    # presence/read/timestamp checks, but naturally ages between rare releases.
+    # bytecode is optional. Never select another component/directory as daily.
+    for name in daily main bytecode; do
+        found=0
+        for file in "$directory/$name.cvd" "$directory/$name.cld"; do
+            [ -e "$file" ] || continue
+            found=1
+            if [ ! -f "$file" ] || [ ! -r "$file" ] || [ ! -s "$file" ] || ! age="$(hc_file_age_hours "$file")"; then
+                hc_status ERROR "ClamAV $name database unreadable, empty or timestamp unavailable/in the future"
+                continue
+            fi
+            hc_detail "ClamAV $name database age: ${age}h ($file)"
+            if [ "$name" = daily ] && [ "$age" -gt "${CLAM_SIG_MAX_AGE_HOURS:-48}" ]; then
+                hc_warn "ClamAV daily signatures are ${age}h old (threshold ${CLAM_SIG_MAX_AGE_HOURS:-48}h)"
+            fi
+        done
+        if [ "$found" = 0 ] && [ "$name" != bytecode ]; then
+            hc_status ERROR "ClamAV required $name database missing from active directory"
+        fi
+    done
+    return 0
 }
 
 _clamav_last_success_epoch() {
-    local line ts
-    line="$(
-        journalctl \
-            -u "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" \
-            -u "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" \
-            --since "7 days ago" --no-pager -o short-iso 2>/dev/null |
-        grep -Ei 'updated \(|up-to-date|database.*up-to-date|Database test passed' |
-        tail -n1
-    )"
-    [ -n "$line" ] || return 1
-    ts="$(printf '%s\n' "$line" | awk '{print $1}')"
-    date -d "$ts" +%s 2>/dev/null
+    local journal now
+    journal="$(journalctl \
+        -u "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" \
+        -u "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" \
+        --since '7 days ago' --no-pager -o short-iso 2>/dev/null)" || return 1
+    now="$(date +%s)" || return 1
+    hc_data_parse freshclam "$now" <<< "$journal" 2>/dev/null
 }
 
 check_clamav() {
@@ -37,20 +79,8 @@ check_clamav() {
 
     hc_check_service "${CLAMAV_SERVICE:-clamd@scan}" "ClamAV" || true
 
-    local sig_file sig_age updater_detected=0 last now age_hours
-    sig_file="$(_clamav_find_newest_db)"
-
-    if [ -z "$sig_file" ]; then
-        hc_warn "ClamAV: no recognized official signature database found"
-    else
-        sig_age="$(hc_file_age_hours "$sig_file" || echo -1)"
-        hc_detail "ClamAV official database age: ${sig_age}h"
-        if [ "$sig_age" -lt 0 ]; then
-            hc_warn 'ClamAV database timestamp unavailable or in the future'
-        elif [ "$sig_age" -gt "${CLAM_SIG_MAX_AGE_HOURS:-48}" ]; then
-            hc_warn "ClamAV official signatures are ${sig_age}h old (threshold ${CLAM_SIG_MAX_AGE_HOURS:-48}h)"
-        fi
-    fi
+    local updater_detected=0 last now age_hours
+    _clamav_check_databases
 
     if hc_have freshclam; then
         hc_detail "FreshClam: installed"
@@ -90,16 +120,15 @@ check_clamav() {
 
     [ "$updater_detected" -eq 1 ] || hc_warn "FreshClam: no enabled automatic updater detected"
 
-    last="$(_clamav_last_success_epoch || true)"
-    if [ -n "$last" ]; then
-        now="$(date +%s)"
+    if last="$(_clamav_last_success_epoch)" && now="$(date +%s)" &&
+       hc_uint "$now" && hc_uint "$last" && [ "$last" -le "$now" ]; then
         age_hours="$(( (now - last) / 3600 ))"
         hc_detail "FreshClam last successful update/check: ${age_hours}h ago"
         if [ "$age_hours" -gt "${FRESHCLAM_MAX_AGE_HOURS:-36}" ]; then
             hc_warn "FreshClam: last successful update/check was ${age_hours}h ago (threshold ${FRESHCLAM_MAX_AGE_HOURS:-36}h)"
         fi
     else
-        hc_warn "FreshClam: no successful update/check found in recent journal"
+        hc_warn "FreshClam: latest update/check failed, incomplete or journal unavailable/invalid (UNKNOWN)"
     fi
     return 0
 }

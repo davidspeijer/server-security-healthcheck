@@ -33,6 +33,8 @@ DISK_PATHS="/ /home /var /tmp"
 # ClamAV
 CHECK_CLAMAV=auto
 CLAMAV_SERVICE=clamd@scan
+# Optional: explicitly inspect this clamd config; otherwise derive it from the unit.
+# CLAMAV_CONFIG_FILE=/etc/clamd.d/scan.conf
 CLAM_SIG_MAX_AGE_HOURS=48
 FRESHCLAM_MAX_AGE_HOURS=36
 FRESHCLAM_SERVICE=clamav-freshclam.service
@@ -47,6 +49,7 @@ FRESHCLAM_ONESHOT_SERVICE=clamav-freshclam-once.service
 LMD_ENABLED=auto
 LMD_DIR=/usr/local/maldetect
 LMD_SERVICE=maldet.service
+# Explicit audit selection: missing/unreadable/malformed input reports ERROR.
 LMD_AUDIT=/var/log/maldet/audit.log
 # Optional path overrides (defaults derive from LMD_DIR).
 # LMD_EVENT_LOG=/usr/local/maldetect/logs/event_log

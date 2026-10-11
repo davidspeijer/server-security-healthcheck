@@ -39,7 +39,7 @@ hc_age_seconds() {
 
 # Configuration is data, never shell code. Only documented names may be assigned;
 # quotes are delimiters, not instructions to expand variables or run commands.
-hc_load_config() {
+_hc_load_config_data() {
     local file="$1" line key value rest number=0
     local assignment='^[[:space:]]*([A-Z][A-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$'
     while IFS= read -r line || [ -n "$line" ]; do
@@ -52,7 +52,7 @@ hc_load_config() {
             LOOKBACK_HOURS|NOTIFY_TELEGRAM|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             CHECK_APACHE|APACHE_SERVICE|CHECK_RSPAMD|RSPAMD_SERVICE|CHECK_PUREFTP|PUREFTP_UPLOADSCAN_SERVICE|\
             CHECK_EXIM|EXIM_SERVICE|MAILQUEUE_WARN|CHECK_DISK|DISK_WARN_PERCENT|DISK_PATHS|\
-            CHECK_CLAMAV|CLAMAV_SERVICE|CLAM_SIG_MAX_AGE_HOURS|FRESHCLAM_MAX_AGE_HOURS|\
+            CHECK_CLAMAV|CLAMAV_SERVICE|CLAMAV_CONFIG_FILE|CLAM_SIG_MAX_AGE_HOURS|FRESHCLAM_MAX_AGE_HOURS|\
             FRESHCLAM_SERVICE|FRESHCLAM_TIMER|FRESHCLAM_ONESHOT_SERVICE|\
             CHECK_LMD|LMD_ENABLED|LMD_SERVICE|LMD_BIN|LMD_DIR|LMD_AUDIT|LMD_MONITOR_LIST|LMD_WEBROOT_LIST|\
             LMD_SIG_MAX_AGE_HOURS|LMD_SIGUP_MAX_AGE_HOURS|LMD_UPDATE_FAILURE_LOOKBACK_HOURS|\
@@ -108,6 +108,15 @@ hc_load_config() {
     done < "$file"
 }
 
+# Disable tracing before even reading credential-bearing configuration lines.
+hc_load_config() {
+    local tracing=0 result
+    case $- in *x*) tracing=1; set +x ;; esac
+    _hc_load_config_data "$@"; result=$?
+    [ "$tracing" = 0 ] || set -x
+    return "$result"
+}
+
 hc_require_dependencies() {
     local dependency
     for dependency in date stat hostname awk grep sed find sort comm wc mktemp rm head tail cut df; do
@@ -158,26 +167,19 @@ hc_file_age_hours() {
     echo $(( (now - mtime) / 3600 ))
 }
 
+# Resolve beside this installed common module, never from caller-controlled cwd.
+HC_DATA_PARSER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/checks/health_data.py"
+hc_data_parse() {
+    hc_have python3 && [ -r "$HC_DATA_PARSER" ] || return 1
+    python3 "$HC_DATA_PARSER" "$@"
+}
+
 hc_json_event_count_since() {
-    local event_type="$1" file="$2" hours="$3"
-    local now since line ts ts_epoch count=0
-
-    [ -f "$file" ] || {
-        echo 0
-        return
-    }
-
-    now="$(date +%s)"
-    since="$((now - hours * 3600))"
-
-    while IFS= read -r line; do
-        ts="$(printf '%s\n' "$line" | sed -n 's/.*"ts"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-        [ -n "$ts" ] || continue
-        ts_epoch="$(date -d "$ts" +%s 2>/dev/null || echo 0)"
-        [ "$ts_epoch" -ge "$since" ] && count=$((count + 1))
-    done < <(grep -E "\"type\"[[:space:]]*:[[:space:]]*\"${event_type}\"" "$file" 2>/dev/null || true)
-
-    echo "$count"
+    local event_type="$1" file="$2" hours="$3" now
+    hc_uint "$hours" || return 1
+    now="$(date +%s)" || return 1
+    hc_uint "$now" || return 1
+    hc_data_parse audit "$file" "$event_type" "$hours" "$now" 2>/dev/null
 }
 
 hc_register_check() {

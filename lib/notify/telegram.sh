@@ -1,31 +1,37 @@
 #!/usr/bin/env bash
 
-notify_telegram() {
-    local message="$1"
-
+_telegram_send() {
+    local message="$1" value
     hc_enabled "${NOTIFY_TELEGRAM:-0}" || return 0
-
-    if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
-        hc_log "ERROR Telegram enabled but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing"
+    if [[ ! "${TELEGRAM_BOT_TOKEN:-}" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] ||
+       [[ ! "${TELEGRAM_CHAT_ID:-}" =~ ^(-?[0-9]+|@[A-Za-z0-9_]+)$ ]]; then
+        hc_log 'ERROR Telegram credentials missing or malformed'
         return 1
     fi
-
-    if ! hc_have curl; then
-        hc_log "ERROR curl is required for Telegram notifications"
-        return 1
-    fi
-
-    # Telegram limits messages to 4096 characters. Keep bounded diagnostics in
-    # notifications; the CLI/journal retains full paths and per-hit details.
+    hc_have curl || { hc_log 'ERROR curl is required for Telegram notifications'; return 1; }
     if [ "${#message}" -gt 3500 ]; then
         message="${message:0:3500}"$'\n… Truncated; see the healthcheck CLI/systemd journal for full details.'
     fi
+    # Bash builtins write a config over stdin: no credential-bearing child argv,
+    # exported environment, or temporary file. Suppress curl URL diagnostics.
+    if ! {
+        printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_BOT_TOKEN"
+        printf 'data-urlencode = "chat_id=%s"\n' "$TELEGRAM_CHAT_ID"
+        value="${message//\\/\\\\}"; value="${value//\"/\\\"}"
+        value="${value//$'\n'/\\n}"; value="${value//$'\r'/\\r}"; value="${value//$'\t'/\\t}"
+        printf 'data-urlencode = "text=%s"\n' "$value"
+    } | curl --config - -fsS --max-time 20 -X POST >/dev/null 2>/dev/null; then
+        hc_log 'ERROR Telegram transport failed'
+        return 1
+    fi
+}
 
-    curl -fsS --max-time 20 \
-        -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=${message}" \
-        >/dev/null
+notify_telegram() {
+    local tracing=0 result
+    case $- in *x*) tracing=1; set +x ;; esac
+    _telegram_send "$@"; result=$?
+    [ "$tracing" = 0 ] || set -x
+    return "$result"
 }
 
 notify_test() {

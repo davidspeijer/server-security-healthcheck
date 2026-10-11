@@ -253,16 +253,24 @@ Selected protection settings are compared in the base and any present overlays.
 The default daily source precedence is base, compatibility overlay, sysconfig (or
 its default-file fallback), then cron override. Missing cron switches inherit the
 preceding value for effective-value calculation, but the separate expected explicit
-override check still warns. For monitor mode, the inspected stock systemd layout
-loads both environment files in order; an empty argument uses the base/runtime
-`default_monitor_mode`, not the daily-only override.
+override check still warns. Monitor environment handling uses a separate bounded
+systemd parser: leading whitespace, comments, continuations, directive/list resets,
+inline last-assignment precedence, and EnvironmentFile overrides in file order.
+Only literal sysconfig/default file paths and the stock monitor argument are
+supported. The configured inspection paths map to those two unit paths. Unknown
+escapes/specifiers, malformed directives/files, manager-provided MONITOR_MODE,
+or relevant UnsetEnvironment produce UNKNOWN. Unsetting occurs after command
+expansion, so it cannot safely imply a fallback monitor argument.
 
-The daily recognizer checks supported path bindings, source order/file guards and
-directly guarded `maldet -d/-u` calls. It accepts the stock upstream update section,
-not arbitrary equivalent scripts. Changes produce UNKNOWN rather than assuming
-the named override file is actually used. Daily custom commands and applicable DTC
-imports need review. This is bounded structural inspection, not a security proof
-about arbitrary executable shell code or the scheduler's live state.
+The daily recognizer validates Bash syntax without execution, then compares the
+entire script to the minimal source/update contract or the complete observed stock
+2.0.1 contract embedded as data in `health_data.py`. Whole-line comments, blank
+lines and leading/trailing whitespace are ignored; source order, quoting, guards,
+updates and all other statements must match. Full-stock flock/maintenance/platform
+logic is accepted only in that exact layout. Extra guards/functions/early exits,
+changed wrappers, AND/OR conditions and unknown statements cause UNKNOWN. Custom
+commands and applicable DTC imports still need the existing separate review.
+See [the F07–F14 report](AUDIT-F07-F14.md) for exact contract and failure semantics.
 
 Cron definitions require exactly one active root job per configured cron.d file.
 Five normalized schedule fields are compared to expectations. The tokenizer keeps

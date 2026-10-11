@@ -130,10 +130,13 @@ _lmd_check_service() {
 
 _lmd_check_events() {
     local threats failures audit="${LMD_AUDIT:-/var/log/maldet/audit.log}"
-    [ -e "$audit" ] || return 0
-    [ -r "$audit" ] || { hc_warn "LMD audit log unreadable: $audit"; return; }
-    threats="$(hc_json_event_count_since threat_detected "$audit" "${LOOKBACK_HOURS:-24}")"
-    failures="$(hc_json_event_count_since alert_failed "$audit" "${LOOKBACK_HOURS:-24}")"
+    # The stock audit source is optional; an explicitly selected source is required.
+    if [ ! -e "$audit" ] && [ -z "${LMD_AUDIT:-}" ]; then return 0; fi
+    if ! threats="$(hc_json_event_count_since threat_detected "$audit" "${LOOKBACK_HOURS:-24}")" ||
+       ! failures="$(hc_json_event_count_since alert_failed "$audit" "${LOOKBACK_HOURS:-24}")"; then
+        hc_status ERROR 'LMD audit source read/parse failure; event counts UNKNOWN'
+        return
+    fi
     hc_detail "LMD audit last ${LOOKBACK_HOURS:-24}h: $threats threat_detected, $failures alert_failed"
     [ "$threats" -eq 0 ] || hc_warn "LMD audit: $threats detection event(s); audit count does not classify malware"
     [ "$failures" -eq 0 ] || hc_warn "LMD audit: $failures notification failure event(s)"
@@ -209,6 +212,7 @@ _lmd_check_webroots() {
     local temporary actual monitored missing stale expected_count configured_count covered missing_count stale_count
     local list="${LMD_WEBROOT_LIST:-${LMD_MONITOR_LIST:-${LMD_DIR:-/usr/local/maldetect}/directadmin-webroots}}"
     [ -r "$list" ] || { hc_warn "LMD monitor list unavailable: $list"; return; }
+    hc_have rmdir || { hc_status ERROR 'LMD coverage dependency missing: rmdir'; return; }
     temporary="$(mktemp -d)" || { hc_status ERROR 'Cannot create coverage scratch directory'; return; }
     actual="$temporary/actual" monitored="$temporary/monitored"
     # Both sets use the same bytewise collation. One path per line matches LMD's
@@ -627,6 +631,7 @@ _lmd_check_fullscan() {
         _lmd_select_fullscan
         return
     fi
+    hc_have rmdir || { hc_status ERROR 'LMD native fullscan dependency missing: rmdir'; return; }
     scratch="$(mktemp -d)" || { hc_status ERROR 'Cannot create LMD metadata scratch directory'; return; }
     _lmd_native_records "$original" "$scratch" "${LMD_EXPECTED_FULLSCAN_PATH:-/home/?/domains/?/public_html/}" "$(date +%s)"
     for file in "$original"/scan.meta.*; do
@@ -792,14 +797,17 @@ check_lmd() {
         [ "$mode" = auto ] || hc_warn 'LMD integration enabled but installation directory is unavailable'
         return
     fi
-    _lmd_check_configuration
-    hc_have rmdir || { hc_status ERROR 'LMD dependency missing: rmdir'; return; }
+    local LMD_MONITOR_AVAILABLE=1
     if hc_enabled "${LMD_MONITOR_REQUIRED:-1}"; then
         for dependency in systemctl pgrep; do
-            hc_have "$dependency" || { hc_status ERROR "LMD dependency missing: $dependency"; return; }
+            if ! hc_have "$dependency"; then
+                hc_status ERROR "LMD monitor dependency missing: $dependency"
+                LMD_MONITOR_AVAILABLE=0
+            fi
         done
     fi
-    _lmd_check_service
+    _lmd_check_configuration
+    [ "$LMD_MONITOR_AVAILABLE" = 0 ] || _lmd_check_service
     _lmd_check_events
     _lmd_check_signature_updater
     _lmd_check_program_updater

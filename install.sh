@@ -31,6 +31,9 @@ done
 install -m 0644 "$ROOT_DIR/lib/checks/lmd_scanner.py" \
     /usr/local/lib/server-security-healthcheck/checks/lmd_scanner.py
 
+install -m 0644 "$ROOT_DIR/lib/checks/health_data.py" \
+    /usr/local/lib/server-security-healthcheck/checks/health_data.py
+
 for f in "$ROOT_DIR"/lib/notify/*.sh; do
     install -m 0644 "$f" \
         "/usr/local/lib/server-security-healthcheck/notify/$(basename "$f")"

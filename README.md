@@ -21,7 +21,9 @@ webroot discovery is an optional part of LMD monitoring, not a dependency.
 Required: Bash 4+, GNU coreutils (including `date` and `stat`), grep, sed, awk,
 findutils, and hostname. Required command availability and GNU date support are
 checked before checks run. Service checks need systemd; ClamAV needs journalctl;
-LMD realtime monitoring needs procps/pgrep. Curl is needed only for Telegram.
+LMD realtime monitoring needs procps/pgrep. Python 3.6+ (standard library only)
+is required for ClamAV/FreshClam, audit JSON and systemd environment parsing.
+Curl is needed only for Telegram.
 Optional application binaries are required only for enabled integrations.
 
 Service integrations support `1` (required), `0` (disabled), or `auto` (check when
@@ -116,7 +118,7 @@ overrides from untrusted users in a privileged wrapper.
 | `LMD_SERVICE` | `maldet.service` | Realtime unit; old `maldet` value still works |
 | `LMD_EVENT_LOG` | `$LMD_DIR/logs/event_log`, then `/var/log/maldet/event_log` | Event source; shown `$LMD_DIR` notation describes a code default, not config expansion |
 | `LMD_SESSION_DIR` | `$LMD_DIR/sess` | Fullscan metadata and TSV sessions |
-| `LMD_AUDIT` | `/var/log/maldet/audit.log` | Optional JSON event counts |
+| `LMD_AUDIT` | `/var/log/maldet/audit.log` | JSONL event counts; an explicitly selected missing/unreadable/invalid source is ERROR |
 | `LMD_MONITOR_REQUIRED` | `1` | `0` makes realtime monitoring informational |
 | `LMD_MONITOR_MAX_IDLE_MINUTES` | `90` | Maximum scan/filter heartbeat idle time |
 | `LMD_MONITOR_PROCESS_PATTERN` | `inotifywait.*(--fromfile\|--from-file)` | pgrep extended regex, never executed as a command |
@@ -418,21 +420,48 @@ daily program updates. Missing/commented jobs, different schedules or targets,
 extra jobs in the selected files, unexpected commands and removed overrides are
 reported. Recognized cron commands are parsed as literal tokens, never executed.
 
-Monitor resolution differs: the stock systemd unit loads **both** environment
-files in order, with `/etc/default/maldet` last. The unit definition is checked for
-that supported layout and its `--monitor ${MONITOR_MODE}` argument. An absent/empty
-mode falls back to `default_monitor_mode`, including applicable runtime overlays.
-Unknown unit layouts/drop-ins are WARNING rather than an assumed effective mode.
+Monitor resolution reads the concatenated unit/drop-ins from `systemctl cat` as
+data, including indentation, tabs and continuations. Repeated `Environment=`
+assignments use the last value; an empty directive resets its assignments.
+`EnvironmentFile=` values override inline assignments and are applied in file
+order, regardless of their position among inline directives. Only the literal
+sysconfig/default paths are supported; their corresponding configured inspection
+paths are used. File-list resets are respected. Absent optional files are skipped;
+unreadable files, unsupported escapes/specifiers and ambiguous layouts warn UNKNOWN.
+An absent/empty mode falls back to `default_monitor_mode` in the runtime context.
+`PassEnvironment=MONITOR_MODE` without a known override is UNKNOWN.
+A relevant `UnsetEnvironment=` is also UNKNOWN: unsetting happens after command
+argument expansion, so assuming the fallback would be incorrect.
 
 These are **static configuration checks**, not proof that cron is executing or the
-running service has reloaded its settings. The daily recognizer supports the stock
-LMD 2.x update/source section; altered/indirect shell logic is UNKNOWN/WARNING.
+running service has reloaded its settings. The daily recognizer compares the
+**whole file** against two explicit contracts: the minimal source/update layout
+and the complete observed LMD 2.0.1 stock daily script, including its exact flock,
+maintenance and platform sections. Blank lines, whole-line comments and indentation
+are ignored; other quoting/statements/control flow must match. Extra outer guards,
+functions, early exits or altered wrappers yield UNKNOWN/WARNING. Files are never
+sourced or executed; `bash -n` only checks syntax. The exact supported forms and
+compatibility limits are described in [the audit report](docs/AUDIT-F07-F14.md).
 It is not a general shell interpreter or exhaustive audit of other cron files,
 user crontabs, systemd timers, executable integrity or cron-daemon health. Schedule
 comparison is textual after whitespace normalization; equivalent alternative cron
 expressions should be configured explicitly. Cron environment directives, custom
 wrappers and percent expansion require review. Operational heartbeats, signature
 success logs and scan completion metadata remain independent checks.
+
+Disk checks use `LC_ALL=C df -P -h`. Every record is validated; empty/unusable
+successful output and malformed records are ERROR. Full mountpoint text is kept,
+including internal/trailing spaces. Repeated records retain the highest percentage
+for that mount; threshold equality warns. `DISK_PATHS` remains a legacy whitespace-separated list.
+
+Audit sources are JSON Lines with a string `type` and timezone-qualified ISO `ts`.
+Empty valid files mean zero events. Read failures, invalid JSON/duplicate keys or
+timestamps mean ERROR with UNKNOWN counts, including when mixed with valid records.
+The inclusive interval is `[now - LOOKBACK_HOURS, now]`; future events are errors.
+An absent default audit path is optional only when `LMD_AUDIT` was not explicitly
+set. Missing monitor commands report ERROR without suppressing independent policy,
+audit, updater, coverage and scan findings. ERROR and CRITICAL can coexist; final
+execution errors still take exit status 2.
 
 ### ClamAV / FreshClam
 
@@ -441,8 +470,26 @@ Retained settings: `CLAM_SIG_MAX_AGE_HOURS=48`, `FRESHCLAM_MAX_AGE_HOURS=36`,
 `FRESHCLAM_TIMER=clamav-freshclam-once.timer`, and
 `FRESHCLAM_ONESHOT_SERVICE=clamav-freshclam-once.service`.
 
-Checks cover the ClamAV service, newest recognized official database freshness,
-FreshClam binary, automatic updater and last successful journal update/check.
+The active database directory comes from the selected clamd unit's supported
+`ExecStart ... -c CONFIG` (including `%i`) and its `DatabaseDirectory`. An optional
+`CLAMAV_CONFIG_FILE` explicitly selects the config to inspect; keep it aligned
+with the service. If the directive is absent, `clamconf` reports the installed
+build's default. Missing/ambiguous sources produce ERROR/UNKNOWN; other directories
+are never searched for a fresher substitute. Required `daily` and `main` databases
+are checked separately in `.cvd`/`.cld` format. Daily alone uses the age threshold;
+main releases naturally age. Bytecode is optional and cannot mask daily. Every
+present recognized file must be readable, nonempty and have a nonfuture timestamp;
+if both formats exist, neither can hide a stale/invalid other file.
+
+FreshClam reads only the selected services' seven-day journal, not rotated log
+files. A start followed by successful `daily`, `main`, and `bytecode` installation/
+up-to-date records, or an explicit overall completion, proves the supported
+attempt complete. `Database test passed` alone never proves completion. Later
+failures/new incomplete attempts invalidate older success. Process interleaving,
+nonmonotone or invalid timestamps and unavailable journals warn UNKNOWN. All
+future timestamps are rejected, including small clock skew; negative ages are
+never reported as healthy. A bytecode-disabled/custom update layout without
+supported overall completion therefore warns UNKNOWN even if daily is current.
 The timer must be enabled **and active**; its oneshot must exist and must not be
 failed. A successful inactive oneshot is normal. An enabled active FreshClam daemon
 is an alternative updater. This does not run freshclam or update databases.
@@ -467,6 +514,12 @@ not an external watchdog for crashes or runs that never start.
 Messages are plain text, with bounded length; full diagnostics remain in CLI/systemd output. Telegram
 is the only intentional network write during a check; enable it only when sending
 these operational details is appropriate. Configured LMD secrets are never used.
+The bot URL, token, chat ID and message are passed through curl's stdin config,
+with literal escaping and no temporary credential file. Token/chat syntax is
+validated. Curl stdout/stderr are suppressed and failures receive a generic local
+message. Credential loading and sending disable shell tracing while handling
+values, restoring the caller's tracing afterward. Response-body `ok:false`
+interpretation is unchanged.
 
 ## Example output
 

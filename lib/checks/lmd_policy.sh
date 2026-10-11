@@ -213,51 +213,47 @@ _lmd_effective_config_value() {
     printf '%s' "$value"
 }
 
-# A bounded static recognizer for the stock daily update section, NOT a shell
-# interpreter. Check source order and directly guarded updater calls. Altered or
-# indirect updater constructs are UNKNOWN; never execute the cron script.
+# Compare complete supported daily layouts; this is not a shell interpreter.
+# Extra statements/control flow are UNKNOWN; never execute the cron script.
 _lmd_daily_contract() {
     local file="$1"
     [ -f "$file" ] && [ -r "$file" ] && [ -x "$file" ] || return 1
-    awk -v root="${LMD_DIR:-/usr/local/maldetect}" '
-        BEGIN {gsub(/[[:space:]]/,"",root)}
-        /^[[:space:]]*#/ || /^[[:space:]]*$/ {next}
-        {
-            s=$0; gsub(/[[:space:]"\047]/,"",s)
-            if (s ~ /^echo/) {
-                if (s ~ /maldet(-d|-u|--update)/ && s !~ /^echo\$\(date\)cron.daily:maldet-(d|u)\((version|signature)update\)failed>>\$maldet_log$/) bad=1
-                previous=NR; previous_text=s; next
-            }
-            if (s ~ /^inspath=/) {root_seen=1; if(s!="inspath=" root)bad=1}
-            if (s ~ /^intcnf=/) {internal_path=1; if(s!="intcnf=$inspath/internals/internals.conf")bad=1}
-            if (s ~ /^(\.|source)/ && s!=".$intcnf" && s!="source$intcnf" && s!=".$cnf" && s!="source$cnf" &&
-                s!=".$compatcnf" && s!="source$compatcnf" && s!="./etc/sysconfig/maldet" && s!="source/etc/sysconfig/maldet" &&
-                s!="./etc/default/maldet" && s!="source/etc/default/maldet" && s!=".$cron_custom_conf" && s!="source$cron_custom_conf" &&
-                s!=".$cron_custom_exec" && s!="source$cron_custom_exec" &&
-                s!="./var/lib/dtc/saved_install_config") bad=1
-            if (s==".$intcnf" || s=="source$intcnf") {internal=NR; if(previous_text!="if[-f$intcnf];then")bad=1}
-            if (s==".$cnf" || s=="source$cnf") {base=NR; if(previous_text!="if[-f$cnf];then")bad=1}
-            if (s==".$compatcnf" || s=="source$compatcnf") {compat=NR; if(previous_text!="if[-f$compatcnf];then")bad=1}
-            if (s=="./etc/sysconfig/maldet" || s=="source/etc/sysconfig/maldet") {env=NR; if(previous_text!="if[-f/etc/sysconfig/maldet];then")bad=1}
-            if (s=="./etc/default/maldet" || s=="source/etc/default/maldet") {fallback=NR; if(previous_text!="elif[-f/etc/default/maldet];then")bad=1}
-            if (s==".$cron_custom_conf" || s=="source$cron_custom_conf") {override=NR; if(previous_text!="if[-f$cron_custom_conf];then")bad=1}
-            if (s ~ /^if\[\$autoupdate_version(==|=)1\];then$/) version_guard=NR
-            if (s ~ /^if\[\$autoupdate_signatures(==|=)1\];then$/) sig_guard=NR
-            if (s ~ /maldet(-d|--update-ver)/) {
-                version_calls++
-                if (previous!=version_guard || !override || NR<override || s !~ /^\$inspath\/maldet-d1?2>&1\|tail-20>>\$maldet_log$/) bad=1
-            }
-            if (s ~ /maldet(-u|--update-sigs)/) {
-                sig_calls++
-                if (previous!=sig_guard || !override || NR<override || s !~ /^\$inspath\/maldet-u1?2>&1\|tail-20>>\$maldet_log$/) bad=1
-            }
-            # Assignments/eval can invalidate the inferred update switches.
-            if (s ~ /^(export)?autoupdate_(version|signatures)=/ || s ~ /^eval/) bad=1
-            # echo diagnostics about failures are not updater calls.
-            previous=NR; previous_text=s
-        }
-        END {exit !(root_seen && internal_path && internal && base>internal && compat>base && env>compat && fallback>env && override>fallback && version_calls==1 && sig_calls==1 && !bad)}
-    ' "$file"
+    # Full-file bounded contract: no extra statements, wrappers or control flow.
+    # Syntax checking parses only; it never executes the script.
+    bash -n "$file" 2>/dev/null || return 1
+    local actual expected
+    actual="$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$file")" || return 1
+    expected="$(cat <<EOF
+inspath='${LMD_DIR:-/usr/local/maldetect}'
+intcnf="\$inspath/internals/internals.conf"
+if [ -f "\$intcnf" ]; then
+. \$intcnf
+fi
+if [ -f "\$cnf" ]; then
+. \$cnf
+if [ -f "\$compatcnf" ]; then
+. \$compatcnf
+fi
+fi
+if [ -f "/etc/sysconfig/maldet" ]; then
+. /etc/sysconfig/maldet
+elif [ -f "/etc/default/maldet" ]; then
+. /etc/default/maldet
+fi
+if [ -f "\$cron_custom_conf" ]; then
+. \$cron_custom_conf
+fi
+if [ "\$autoupdate_version" == "1" ]; then
+\$inspath/maldet -d 1 2>&1 | tail -20 >> "\$maldet_log"
+fi
+if [ "\$autoupdate_signatures" == "1" ]; then
+\$inspath/maldet -u 1 2>&1 | tail -20 >> "\$maldet_log"
+fi
+EOF
+)" || return 1
+    # Only leading/trailing whitespace is immaterial; quoting remains semantic.
+    actual="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<< "$actual")" || return 1
+    [ "$actual" = "$expected" ] || hc_data_parse daily "$file" "${LMD_DIR:-/usr/local/maldetect}" >/dev/null 2>&1
 }
 
 _lmd_daily_bindings() {
@@ -378,33 +374,15 @@ _lmd_check_cron_rule() {
 
 _lmd_check_monitor_config() {
     hc_enabled "${LMD_MONITOR_REQUIRED:-1}" || return 0
-    local sysconfig="$1" default="$2" expected="$3" file value='' next status unit env_files='' exec_start=''
+    local sysconfig="$1" default="$2" expected="$3" value='' unit
     [ "$expected" = ignore ] && return 0
+    [ "${LMD_MONITOR_AVAILABLE:-1}" = 1 ] || return 0
     hc_have systemctl || { hc_warn 'LMD monitor configuration: systemctl unavailable'; return; }
     unit="$(systemctl cat "${LMD_SERVICE:-maldet.service}" 2>/dev/null)" || { hc_warn 'LMD monitor unit configuration unavailable'; return; }
-    # The stock service loads sysconfig followed by default; EnvironmentFile order
-    # is meaningful. Unknown drop-ins/inline overrides must not yield a policy PASS.
-    env_files="$(awk '/^\[/{service=($0=="[Service]")} service && /^EnvironmentFile=/{v=substr($0,17);if(v=="")r="";else r=r v "\n"} END{printf "%s",r}' <<< "$unit")"
-    exec_start="$(awk '/^\[/{service=($0=="[Service]")} service && /^ExecStart=/{v=substr($0,11)} END{print v}' <<< "$unit")"
-    if [ "$env_files" != $'-/etc/sysconfig/maldet\n-/etc/default/maldet' ] ||
-        [[ "$exec_start" != "${LMD_DIR:-/usr/local/maldetect}/maldet --monitor \${MONITOR_MODE}" && "$exec_start" != "${LMD_DIR:-/usr/local/maldetect}/maldet --monitor \$MONITOR_MODE" ]] ||
-        grep -Eq '^(Environment|UnsetEnvironment|PassEnvironment)=.*MONITOR_MODE' <<< "$unit"; then
-        hc_warn 'LMD monitor unit differs from the supported EnvironmentFile/ExecStart layout; effective MONITOR_MODE unknown'
+    if ! value="$(hc_data_parse monitor "${LMD_DIR:-/usr/local/maldetect}" "$sysconfig" "$default" <<< "$unit" 2>/dev/null)"; then
+        hc_warn 'LMD monitor unit/environment is unsupported or unreadable (export is not a systemd EnvironmentFile assignment); effective MONITOR_MODE unknown'
         return
     fi
-    for file in "$sysconfig" "$default"; do
-        [ -e "$file" ] || continue
-        if grep -Eq '^[[:space:]]*export[[:space:]]+MONITOR_MODE' "$file"; then
-            hc_warn "LMD MONITOR_MODE uses export, which is not a systemd EnvironmentFile assignment ($file)"
-            return
-        fi
-        next="$(_lmd_config_get "$file" MONITOR_MODE)"; status=$?
-        case "$status" in
-            0) value="$next" ;;
-            1) ;;
-            *) hc_warn "LMD MONITOR_MODE cannot be safely read from $file"; return ;;
-        esac
-    done
     if [ -z "$value" ]; then
         value="$(_lmd_effective_config_value default_monitor_mode runtime)" || {
             hc_warn 'LMD MONITOR_MODE and default_monitor_mode are missing/unreadable'; return;
