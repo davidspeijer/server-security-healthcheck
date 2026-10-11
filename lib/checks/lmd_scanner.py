@@ -12,6 +12,8 @@ import shlex
 import datetime
 import time
 from pathlib import Path
+sys.dont_write_bytecode = True  # Runtime parsing must not write installed libraries.
+from bounded_input import lines, arm_timeout, BudgetExceeded
 
 MARKER = re.compile(r'^(...\s+\d{1,2} \d{4} \d{2}:\d{2}:\d{2}) (\S+) clamscan (start|end return ([012]))$')
 EXECUTED = re.compile(r'^(...\s+\d{1,2} \d{4} \d{2}:\d{2}:\d{2}) (\S+) executed: (.+)$')
@@ -101,11 +103,10 @@ def historical_finished(directory, scanner_started, current_started, sessions=No
     proofs = []
     for path in Path(sessions or str(Path(directory).parent / 'sess')).glob('scan.meta.*'):
         fields = {}
-        with open(str(path), 'rt', encoding='utf-8', errors='strict') as source:
-            for line in source:
-                key, separator, value = line.rstrip('\n').partition('=')
-                if separator:
-                    fields[key] = value
+        for line in lines(str(path)):
+            key, separator, value = line.rstrip('\n').partition('=')
+            if separator:
+                fields[key] = value
         start, end = fields.get('started', ''), fields.get('completed', '')
         if not re.fullmatch(r'[0-9]{1,12}', start) or not re.fullmatch(r'[0-9]{1,12}', end):
             continue
@@ -115,7 +116,7 @@ def historical_finished(directory, scanner_started, current_started, sessions=No
     return bool(proofs) and all(proofs)
 
 
-def result(directory, started, ended, sessions=None):
+def result(directory, started, ended, sessions=None, snapshot=None):
     if not 0 < started <= ended:
         raise ValueError('invalid interval')
     files = []
@@ -141,79 +142,81 @@ def result(directory, started, ended, sessions=None):
     relevant_files = set()
     for _, path in sorted(files):
         opener = gzip.open if path.name.endswith('.gz') else open
-        with opener(str(path), 'rt', encoding='utf-8', errors='strict') as log:
-            for raw in log:
-                line = raw.rstrip('\n')
-                marker = MARKER.fullmatch(line)
-                if marker:
-                    stamp, host, kind, code = marker.groups()
-                    # Local LMD timestamps lack an offset. DST ambiguity must
-                    # not silently select the wrong scan interval.
-                    try:
-                        epoch = local_epoch(stamp)
-                    except ValueError:
-                        if active is None and outside_stamp(stamp, started, ended):
-                            continue
-                        raise
-                    if epoch < started:
-                        if active is not None:
-                            raise ValueError('out-of-interval marker inside scan')
-                        if kind == 'start': historical_starts.append(epoch)
-                        elif historical_starts: historical_starts.pop()
+        log = snapshot[str(path)] if snapshot is not None else lines(str(path))
+        for raw in log:
+            if '\x00' in raw:
+                raise ValueError('NUL in scanner text')
+            line = raw.rstrip('\n')
+            marker = MARKER.fullmatch(line)
+            if marker:
+                stamp, host, kind, code = marker.groups()
+                # Local LMD timestamps lack an offset. DST ambiguity must
+                # not silently select the wrong scan interval.
+                try:
+                    epoch = local_epoch(stamp)
+                except ValueError:
+                    if active is None and outside_stamp(stamp, started, ended):
                         continue
-                    if epoch > ended:
-                        if active is not None:
+                    raise
+                if epoch < started:
+                    if active is not None:
+                        raise ValueError('out-of-interval marker inside scan')
+                    if kind == 'start': historical_starts.append(epoch)
+                    elif historical_starts: historical_starts.pop()
+                    continue
+                if epoch > ended:
+                    if active is not None:
+                        raise ValueError('interval overlap')
+                    continue
+                relevant_files.add(path.name)
+                if epoch < previous_epoch:
+                    raise ValueError('unordered markers')
+                previous_epoch = epoch
+                if kind == 'start':
+                    if active is not None or any(not historical_finished(directory, old, started, sessions) for old in historical_starts):
+                        raise ValueError('overlapping scans')
+                    historical_starts = []
+                    active = dict(start=epoch, host=host, access=0, volatile=0,
+                                  other=0, executed=0, executed_epoch=epoch)
+                else:
+                    if active is not None:
+                        if active['host'] != host:
+                            raise ValueError('host conflict')
+                        if not active['start'] <= active['executed_epoch'] <= epoch:
+                            raise ValueError('invocation timestamp conflict')
+                        if started <= active['start'] <= epoch <= ended:
+                            active['exit'] = int(code)
+                            candidates.append(active)
+                        elif active['start'] <= ended and epoch >= started:
                             raise ValueError('interval overlap')
-                        continue
-                    relevant_files.add(path.name)
-                    if epoch < previous_epoch:
-                        raise ValueError('unordered markers')
-                    previous_epoch = epoch
-                    if kind == 'start':
-                        if active is not None or any(not historical_finished(directory, old, started, sessions) for old in historical_starts):
-                            raise ValueError('overlapping scans')
-                        historical_starts = []
-                        active = dict(start=epoch, host=host, access=0, volatile=0,
-                                      other=0, executed=0, executed_epoch=epoch)
-                    else:
-                        if active is not None:
-                            if active['host'] != host:
-                                raise ValueError('host conflict')
-                            if not active['start'] <= active['executed_epoch'] <= epoch:
-                                raise ValueError('invocation timestamp conflict')
-                            if started <= active['start'] <= epoch <= ended:
-                                active['exit'] = int(code)
-                                candidates.append(active)
-                            elif active['start'] <= ended and epoch >= started:
-                                raise ValueError('interval overlap')
-                        elif started <= epoch <= ended:
-                            raise ValueError('missing start')
-                        active = None
-                elif 'clamscan start' in line or 'clamscan end' in line:
-                    if active is not None or not outside_stamp(line[:20], started, ended):
-                        raise ValueError('malformed marker')
-                elif active is None and EXECUTED.fullmatch(line):
-                    stamp = EXECUTED.fullmatch(line).group(1)
-                    if not outside_stamp(stamp, started, ended):
-                        epoch = local_epoch(stamp)
-                        if started <= epoch <= ended:
-                            raise ValueError('invocation without boundary')
-                elif active is not None:
-                    relevant_files.add(path.name)
-                    access = ACCESS.fullmatch(line)
-                    if access:
-                        active['access'] += 1
-                        active['volatile'] += int(bool(VOLATILE.search(access.group(1))))
-                    elif EXECUTED.fullmatch(line):
-                        stamp, host, command = EXECUTED.fullmatch(line).groups()
-                        if host != active['host'] or not scanner_command(command):
-                            raise ValueError('invocation conflict')
-                        active['executed_epoch'] = local_epoch(stamp)
-                        active['executed'] += 1
-                    elif line.strip():
-                        # Unknown stderr, warnings and retries are not evidence
-                        # of an access-only outcome.
-                        active['other'] += 1
+                    elif started <= epoch <= ended:
+                        raise ValueError('missing start')
+                    active = None
+            elif 'clamscan start' in line or 'clamscan end' in line:
+                if active is not None or not outside_stamp(line[:20], started, ended):
+                    raise ValueError('malformed marker')
+            elif active is None and EXECUTED.fullmatch(line):
+                stamp = EXECUTED.fullmatch(line).group(1)
+                if not outside_stamp(stamp, started, ended):
+                    epoch = local_epoch(stamp)
+                    if started <= epoch <= ended:
+                        raise ValueError('invocation without boundary')
+            elif active is not None:
+                relevant_files.add(path.name)
+                access = ACCESS.fullmatch(line)
+                if access:
+                    active['access'] += 1
+                    active['volatile'] += int(bool(VOLATILE.search(access.group(1))))
+                elif EXECUTED.fullmatch(line):
+                    stamp, host, command = EXECUTED.fullmatch(line).groups()
+                    if host != active['host'] or not scanner_command(command):
+                        raise ValueError('invocation conflict')
+                    active['executed_epoch'] = local_epoch(stamp)
+                    active['executed'] += 1
+                elif line.strip():
+                    # Unknown stderr, warnings and retries are not evidence
+                    # of an access-only outcome.
+                    active['other'] += 1
     # A numeric gap between files carrying a scan may hide diagnostics.
     ordered = sorted(files)
     relevant_indices = [i for i, (_, path) in enumerate(ordered) if path.name in relevant_files]
@@ -237,9 +240,47 @@ def result(directory, started, ended, sessions=None):
     return state, code, access, item['volatile'], other
 
 
+def batch(directory, sessions, metadata):
+    """One immutable log snapshot per invocation; interval state remains local."""
+    snapshot = {}
+    total = 0
+    from bounded_input import limit
+    for path in Path(directory).glob('clamscan_log*'):
+        snapshot[str(path)] = list(lines(str(path)))
+        total += sum(len(item.encode('utf-8')) for item in snapshot[str(path)])
+        if total > limit('MAX_EXPANDED_BYTES', 128 * 1024 * 1024):
+            raise ValueError('aggregate scanner budget exceeded')
+    requests = set()
+    for path in Path(metadata).glob('scan.meta.*'):
+        fields = {}
+        for line in lines(str(path)):
+            key, sep, value = line.rstrip('\n').partition('=')
+            if sep:
+                fields[key] = value
+        try:
+            requests.add((int(fields['started']), int(fields['completed'])))
+        except (KeyError, ValueError):
+            continue
+    output = []
+    for started, ended in sorted(requests):
+        try:
+            item = result(directory, started, ended, sessions, snapshot)
+        except (OSError, EOFError, ValueError, OverflowError):
+            item = ('unknown', '-', 0, 0, 0)
+        output.append((str(started) + ':' + str(ended),) + item)
+    return output
+
+
 if __name__ == '__main__':
     locale.setlocale(locale.LC_TIME, 'C')
+    arm_timeout()
     try:
-        print('\t'.join(map(str, result(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else None))))
-    except (OSError, EOFError, ValueError, OverflowError, IndexError):
+        if sys.argv[1] == '--batch':
+            for row in batch(*sys.argv[2:5]):
+                print('\t'.join(map(str, row)))
+        else:
+            print('\t'.join(map(str, result(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else None))))
+    except (OSError, EOFError, ValueError, OverflowError, IndexError, BudgetExceeded):
+        if sys.argv[1:2] == ['--batch']:
+            sys.exit(1)
         print('unknown\t-\t0\t0\t0')

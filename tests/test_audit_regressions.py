@@ -6,6 +6,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import unittest
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib/checks"))
 import test_healthcheck as fixture
 
 SPEC = importlib.util.spec_from_file_location('scanner', fixture.ROOT / 'lib/checks/lmd_scanner.py')

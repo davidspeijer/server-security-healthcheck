@@ -1,6 +1,6 @@
 # Server Security Healthcheck
 
-Current version: **v0.5.2**.
+Current version: **v0.5.3**.
 
 Standalone, modular, read-only security healthcheck for Linux servers. It reports
 operational problems; it does not scan files for malware, remediate, restart
@@ -21,9 +21,10 @@ webroot discovery is an optional part of LMD monitoring, not a dependency.
 Required: Bash 4+, GNU coreutils (including `date` and `stat`), grep, sed, awk,
 findutils, and hostname. Required command availability and GNU date support are
 checked before checks run. Service checks need systemd; ClamAV needs journalctl;
-LMD realtime monitoring needs procps/pgrep. Python 3.6+ (standard library only)
-is required for ClamAV/FreshClam, audit JSON and systemd environment parsing.
-Curl is needed only for Telegram.
+LMD realtime monitoring needs procps/pgrep. Python 3.6+ (standard library only) is required at startup for bounded configuration
+reading, and for LMD scanner/metadata, ClamAV/FreshClam, audit JSON, systemd
+environment and Telegram response parsing. Production uses Python 3.6.8; tests
+use Python 3.12. Curl is needed only for Telegram.
 Optional application binaries are required only for enabled integrations.
 
 Service integrations support `1` (required), `0` (disabled), or `auto` (check when
@@ -45,7 +46,9 @@ sudo server-security-healthcheck
 ```
 
 To update, obtain the new source and rerun `sudo ./install.sh`. It refreshes the
-executable, libraries, units and `*.conf.example` files. Existing active config
+units and `*.conf.example` files, and stages a complete runtime release beside
+the active runtime. Shell and Python syntax and required files are validated
+before an atomic symlink switch. The launcher pins one release for each run. Existing active config
 files (including symlinks) are preserved. Missing new keys receive defaults; users
 do not need to replace their config. Compare the installed examples to enable new
 options. The installer reloads systemd's unit definitions but does not start the
@@ -86,8 +89,9 @@ that is still running at 07:00 is reported as running within its allowed runtime
 Exit **0** means no reported problems; **1** means warnings/critical findings;
 **2** means the check could not execute reliably (including notification failure).
 The oneshot unit explicitly contains `SuccessExitStatus=1`: findings are a
-successful execution, not a systemd failure. `UNKNOWN` appears in a WARNING when
-evidence cannot be parsed; it is not another exit code. Any application error takes
+successful execution, not a systemd failure. `UNKNOWN` denotes unavailable or
+untrustworthy evidence: scanner UNKNOWN is CRITICAL, ordinary policy/evidence
+UNKNOWN is WARNING, and bounded metadata/audit/configuration read failures are ERROR; it is not another exit code. Any application error takes
 precedence over findings in the exit status, but does not suppress notifications
 for findings from other checks. Execution errors reported by checks also trigger
 notifications when there are no warnings or critical findings; their messages
@@ -507,7 +511,11 @@ Warnings, critical findings and execution errors reported by checks trigger norm
 notifications when Telegram is enabled. Critical findings come first, followed by
 execution errors and then warnings, so policy warnings cannot push errors out of
 the message through truncation. Healthy runs do not send notifications. A failed
-send leaves the notification text on stderr and returns exit status 2.
+send leaves the notification text on stderr and returns exit status 2. Success
+requires both curl success and valid JSON with boolean `"ok": true`; empty,
+malformed, duplicate-key, oversized (>64 KiB) and rejected responses fail. Raw
+API bodies/descriptions are never logged. Credentials travel only through curl
+configuration on stdin, with shell tracing disabled during credential handling.
 Startup failures before notification setup (such as missing/invalid configuration
 or missing core dependencies) still return 2 with local diagnostics only. This is
 not an external watchdog for crashes or runs that never start.
@@ -564,11 +572,17 @@ count; per-hit paths/signatures appear immediately before the finding.
 
 ## Tests and module development
 
-Tests require Python >=3.7 (`subprocess.run(text=True, capture_output=True)`).
-On this server use Python 3.12; the system Python 3.6 remains unchanged.
+Tests use Python 3.12 and its standard library. Runtime uses Python >=3.6;
+the server's system Python 3.6.8 remains unchanged.
 
 ```bash
 python3.12 -m unittest discover -s tests -v
+git diff --check
+for script in bin/server-security-healthcheck install.sh uninstall.sh install-dependencies.sh \
+  lib/common.sh lib/checks/*.sh lib/notify/*.sh; do
+  bash -n "$script" || exit
+done
+# Optional, only if already available:
 shellcheck -S style bin/server-security-healthcheck lib/common.sh lib/checks/*.sh \
   lib/notify/*.sh install.sh uninstall.sh install-dependencies.sh
 ```
@@ -576,8 +590,8 @@ shellcheck -S style bin/server-security-healthcheck lib/common.sh lib/checks/*.s
 The fixture suite uses a fixed clock and mocked service/process/network commands;
 it does not run a scan or contact Telegram. Installation tests use a temporary
 filesystem prefix with administrative commands replaced by test stubs. Python
->=3.6 is also required for the LMD scanner-log reliability parser (stdlib only;
-gzip support, no packages to install with pip). Other checks remain Bash-based.
+>=3.6 is required for all runtime helpers (stdlib/gzip support only; no pip
+packages). Bash modules call helpers for bounded reads and strict data contracts.
 The parser works with the server's system Python 3.6. On macOS, install Bash, coreutils,
 findutils and ShellCheck, prepend their GNU binary paths and set `BASH_BIN` to the
 newer Bash. These are portable local tests, not a live Linux/systemd integration
@@ -601,3 +615,59 @@ corruption is excluded only when interval/metadata evidence proves it irrelevant
 See [LMD parsing rules](docs/LMD-PARSING.md#module-loading-and-scan-evidence-f01f06)
 for the native schema, signatures, supported executable/wrapper grammar and
 compatibility details.
+
+
+## F15–F22 input, discovery and upgrade contract
+
+`bounded_input.py` validates regular files before opening and uses nonblocking
+open plus `fstat` to close the FIFO replacement race. Existing symlinks may point
+to regular files; FIFO, socket and device inputs are rejected. Scanner logs are
+read into one bounded snapshot and analyzed independently for each interval.
+Lifecycle/native files are copied to a private temporary snapshot; metadata fields
+are cached in the parent shell for that check invocation. There is no persistent
+scanner/result cache and no writes to LMD's source directories. Shell parsing
+loops also check elapsed budgets; timeout cannot validate a partial native adapter.
+FreshClam journal output streams directly into its bounded parser.
+
+| Input budget | Default | Test/administrative environment override |
+| --- | --- | --- |
+| Physical file | 64 MiB | `SSHC_MAX_FILE_BYTES` |
+| Expanded file / aggregate scanner or metadata snapshot | 128 MiB | `SSHC_MAX_EXPANDED_BYTES` |
+| UTF-8 record | 64 KiB | `SSHC_MAX_RECORD_BYTES` |
+| Records per file | 1,000,000 | `SSHC_MAX_RECORDS` |
+| Python invocation / Bash parsing scope | 20 seconds | `SSHC_READ_SECONDS` |
+
+Overrides must be positive integers and belong in the trusted invoking environment,
+not `healthcheck.conf`. Limit/read failures cannot prove recovery or yield PASS.
+NUL in shell-bound records is rejected rather than silently stripped by Bash.
+Console/details/notification values escape LF, CR and TAB as `\n`, `\r`, `\t`,
+and other C0/DEL bytes as `\xNN`. Printable Unicode and raw classification data
+are preserved. Telegram's structural separators remain normal newlines; it uses
+plain text without Markdown/HTML parse mode.
+
+Auto-discovery checks a known executable first. Otherwise it requires a successful,
+valid `systemctl list-unit-files` response: a matching unit is PRESENT (including
+an installed disabled/masked unit); an empty successful listing is NOT_APPLICABLE;
+command failure or malformed output is ERROR/DISCOVERY_FAILED. Apache, Rspamd,
+PureFTP, Exim and ClamAV share this contract. LMD checks its installation directory.
+A compact summary reports invoked checks, disabled integrations, not-applicable
+integrations and discovery failures. Explicit service mode checks the requested
+service directly. A disabled integration does not run discovery.
+
+`runtime.manifest` owns shipped library files. Upgrades omit old files only when a
+previous manifest proves ownership; unknown/custom extensions are copied forward.
+A pre-manifest installation cannot prove ownership of an unknown obsolete module,
+so that file is retained for manual review. Active configuration, including broken
+symlinks, is preserved. Failed staging leaves the old release selected and exits
+nonzero. Fresh activation and subsequent upgrades use atomic symlink replacement;
+conversion of an old real runtime directory has a short rename/switch interval and
+restores its backup on handled pre-activation failure. SIGKILL/power loss in that
+one-time migration interval requires manual restoration of `.previous.*`.
+
+Previous releases and migration backups are retained for explicit administrator
+rollback; no automatic pruning is performed. Unit/example files are refreshed
+individually and are not part of the runtime pointer transaction. Failure after
+activation is reported nonzero with the validated release still active; retry the
+installer. Uninstall removes the active runtime pointer and launcher but retains
+archived releases/backups (which may contain custom files) for manual cleanup.
+See [the F15–F22 audit report](docs/AUDIT-F15-F22.md) for measurements and validation.

@@ -59,13 +59,15 @@ _clamav_check_databases() {
 }
 
 _clamav_last_success_epoch() {
-    local journal now
-    journal="$(journalctl \
+    local now
+    now="$(date +%s)" || return 1
+    ( set -o pipefail
+      journalctl \
         -u "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" \
         -u "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" \
-        --since '7 days ago' --no-pager -o short-iso 2>/dev/null)" || return 1
-    now="$(date +%s)" || return 1
-    hc_data_parse freshclam "$now" <<< "$journal" 2>/dev/null
+        --since '7 days ago' --no-pager -o short-iso 2>/dev/null |
+        hc_data_parse freshclam "$now" 2>/dev/null
+    )
 }
 
 check_clamav() {

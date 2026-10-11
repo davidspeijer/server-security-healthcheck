@@ -4,18 +4,41 @@ HC_WARNINGS=()
 HC_DETAILS=()
 HC_ERRORS=0
 HC_ERROR_MESSAGES=()
+HC_NOT_APPLICABLE=0
+HC_DISCOVERY_FAILED=0
+
+# Escape values only at presentation boundaries; classification keeps raw input.
+hc_present() {
+    local value="$1" char escaped octal i
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    for ((i=1; i<32; i++)); do
+        [ "$i" = 9 ] || [ "$i" = 10 ] || [ "$i" = 13 ] || {
+            printf -v octal '%03o' "$i"
+            printf -v char '%b' "\\$octal"
+            printf -v escaped '\\x%02x' "$i"
+            value="${value//"$char"/"$escaped"}"
+        }
+    done
+    value="${value//$'\177'/\\x7f}"
+    printf '%s' "$value"
+}
 
 hc_warn() {
     hc_status WARNING "$1"
 }
 
 hc_detail() {
-    HC_DETAILS+=("$1")
-    printf '  INFO %s\n' "$1"
+    local message
+    message="$(hc_present "$1")"
+    HC_DETAILS+=("$message")
+    printf '  INFO %s\n' "$message"
 }
 
 hc_status() {
-    local level="$1" message="$2"
+    local level="$1" message
+    message="$(hc_present "$2")"
     printf '  %s %s\n' "$level" "$message"
     case "$level" in
         WARNING|CRITICAL) HC_WARNINGS+=("$level $message") ;;
@@ -24,6 +47,13 @@ hc_status() {
             HC_ERROR_MESSAGES+=("$level $message")
             ;;
     esac
+}
+
+# Bound shell processing of already validated snapshots, without spawning a clock.
+hc_budget_expired() {
+    local start="$1" budget="${SSHC_READ_SECONDS:-20}"
+    hc_uint "$budget" && [ "$budget" -gt 0 ] || return 0
+    [ "$((SECONDS - start))" -ge "$budget" ]
 }
 
 hc_uint() { [[ "$1" =~ ^(0|[1-9][0-9]{0,11})$ ]]; }
@@ -40,9 +70,11 @@ hc_age_seconds() {
 # Configuration is data, never shell code. Only documented names may be assigned;
 # quotes are delimiters, not instructions to expand variables or run commands.
 _hc_load_config_data() {
-    local file="$1" line key value rest number=0
+    local file="$1" line key value rest number=0 contents parse_started=$SECONDS
+    contents="$(hc_data_parse bounded "$file" 2>/dev/null)" || { hc_status ERROR "Configuration input UNKNOWN: $file"; return 1; }
     local assignment='^[[:space:]]*([A-Z][A-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$'
     while IFS= read -r line || [ -n "$line" ]; do
+        if hc_budget_expired "$parse_started"; then hc_status ERROR 'Configuration processing budget exceeded'; return 1; fi
         number=$((number + 1))
         line="${line%$'\r'}"
         [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
@@ -105,7 +137,7 @@ _hc_load_config_data() {
             LMD_PROGRAM_UPDATE_EXPECTED) [[ "$value" =~ ^(enabled|disabled|ignore)$ ]] || { hc_status ERROR "Invalid $key"; return 1; } ;;
         esac
         printf -v "$key" '%s' "$value"
-    done < "$file"
+    done <<< "$contents"
 }
 
 # Disable tracing before even reading credential-bearing configuration lines.
@@ -129,7 +161,7 @@ hc_require_dependencies() {
 }
 
 hc_log() {
-    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$(hc_present "$*")"
 }
 
 hc_have() {
@@ -141,7 +173,7 @@ hc_enabled() {
 }
 
 hc_service_active() {
-    systemctl is-active --quiet "$1"
+    systemctl is-active --quiet -- "$1" >/dev/null 2>&1
 }
 
 hc_check_service() {
@@ -195,16 +227,29 @@ hc_mode() {
 }
 
 hc_service_present() {
-    local unit="$1" bin
+    local unit="${1%.service}" bin output name state extra
     shift
-
-    if hc_have systemctl && systemctl cat "$unit" >/dev/null 2>&1; then
-        return 0
-    fi
-
     for bin in "$@"; do
         hc_have "$bin" && return 0
     done
-
-    return 1
+    if ! hc_have systemctl || ! output="$(systemctl list-unit-files "$unit.service" --no-legend --no-pager 2>/dev/null)"; then
+        HC_DISCOVERY_FAILED=$((HC_DISCOVERY_FAILED + 1))
+        hc_status ERROR "Discovery failed: $unit"
+        return 2
+    fi
+    if [ -z "$output" ]; then
+        HC_NOT_APPLICABLE=$((HC_NOT_APPLICABLE + 1))
+        hc_detail "NOT_APPLICABLE: $unit (no service or executable found)"
+        return 1
+    fi
+    while read -r name state extra; do
+        if [[ "$name" != "$unit.service" ]] ||
+           [[ ! "$state" =~ ^(enabled|disabled|static|masked|indirect|generated|transient|alias|linked|enabled-runtime|linked-runtime|masked-runtime)$ ]] ||
+           [[ ! "$extra" =~ ^(enabled|disabled|ignored|-)?$ ]]; then
+            HC_DISCOVERY_FAILED=$((HC_DISCOVERY_FAILED + 1))
+            hc_status ERROR "Discovery failed: $unit (malformed unit listing)"
+            return 2
+        fi
+    done <<< "$output"
+    return 0
 }

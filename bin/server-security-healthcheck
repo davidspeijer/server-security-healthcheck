@@ -3,7 +3,7 @@ set -u
 set -o pipefail
 
 APP_NAME="server-security-healthcheck"
-APP_VERSION="0.5.2"
+APP_VERSION="0.5.3"
 if [ "${1:-}" = --version ]; then
     printf '%s v%s\n' "$APP_NAME" "$APP_VERSION"
     exit 0
@@ -16,10 +16,11 @@ CONFIG_DIR="${SSHC_CONFIG_DIR:-/etc/server-security-healthcheck}"
 LIB_DIR="${SSHC_LIB_DIR:-/usr/local/lib/server-security-healthcheck}"
 MAIN_CONFIG="${CONFIG_DIR}/healthcheck.conf"
 TELEGRAM_CONFIG="${CONFIG_DIR}/telegram.conf"
+LIB_DIR="$(cd -P -- "$LIB_DIR" 2>/dev/null && pwd)" || { echo 'ERROR runtime directory unavailable' >&2; exit 2; }
 CHECK_DIR="${LIB_DIR}/checks"
 NOTIFY_DIR="${LIB_DIR}/notify"
 
-[ -r "${LIB_DIR}/common.sh" ] || {
+[ -f "${LIB_DIR}/common.sh" ] && [ -r "${LIB_DIR}/common.sh" ] || {
     echo "ERROR missing ${LIB_DIR}/common.sh" >&2
     exit 2
 }
@@ -37,11 +38,17 @@ fi
 hc_require_dependencies || exit 2
 hc_load_config "$MAIN_CONFIG" || exit 2
 
-if [ -r "$TELEGRAM_CONFIG" ]; then
+if ! telegram_config_state="$(hc_data_parse file-state "$TELEGRAM_CONFIG" 2>/dev/null)" ||
+   [[ "$telegram_config_state" != ABSENT && "$telegram_config_state" != PRESENT ]]; then
+    hc_status ERROR "Telegram configuration source UNKNOWN: $TELEGRAM_CONFIG"
+    exit 2
+fi
+if [ "$telegram_config_state" = PRESENT ]; then
     hc_load_config "$TELEGRAM_CONFIG" || exit 2
 fi
 
 HC_REGISTERED_CHECKS=()
+HC_DISABLED=0
 
 # Load notification backends.
 for module in "${NOTIFY_DIR}"/*.sh; do
@@ -56,6 +63,7 @@ for specification in apache:CHECK_APACHE:auto rspamd:CHECK_RSPAMD:auto pureftpd:
     IFS=: read -r check_name config_key default_mode <<< "$specification"
     value="${!config_key:-$default_mode}"
     [ "$check_name" != lmd ] || value="${LMD_ENABLED:-$value}"
+    [ "$(hc_mode "$value")" != off ] || HC_DISABLED=$((HC_DISABLED + 1))
     [ "$(hc_mode "$value")" = off ] || HC_REQUIRED[$check_name]=1
 done
 [ "${HC_REQUIRED[lmd]:-0}" = 0 ] || HC_REQUIRED[lmd_policy]=1
@@ -170,12 +178,16 @@ for check_name in "${!HC_REQUIRED[@]}"; do
     [ "${HC_EXECUTED[$check_name]:-0}" = 1 ] || hc_status ERROR "Required check not executed: $check_name"
 done
 
+executed_count=0
+for check_name in "${!HC_EXECUTED[@]}"; do executed_count=$((executed_count + 1)); done
+hc_log "Checks: executed=$executed_count disabled=$HC_DISABLED not_applicable=$HC_NOT_APPLICABLE discovery_failed=$HC_DISCOVERY_FAILED"
+
 if [ "${#HC_WARNINGS[@]}" -eq 0 ] && [ "$HC_ERRORS" -eq 0 ]; then
     hc_log "OK all enabled checks passed"
     exit 0
 fi
 
-host="$(hostname -f 2>/dev/null || hostname)"
+host="$(hc_present "$(hostname -f 2>/dev/null || hostname)")"
 message="⚠️ Security healthcheck — ${host}
 $(date '+%Y-%m-%d %H:%M:%S %Z')
 

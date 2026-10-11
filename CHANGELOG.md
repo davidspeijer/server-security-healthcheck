@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.5.3 — 2026-10-11
+
+- Bound regular-file, gzip, record, event and parser-time input; reject special
+  files and shell-bound NUL records with visible UNKNOWN/ERROR evidence.
+- Share one scanner log snapshot across relevant scans; cache metadata fields
+  within one invocation while preserving interval and recovery semantics.
+- Stage and validate complete runtime releases before atomic activation, preserve
+  configuration/custom extensions, and remove obsolete files only with manifest
+  ownership proof. Retain old releases for explicit rollback.
+- Escape untrusted control characters at console/detail/notification boundaries.
+- Require valid Telegram JSON with boolean `ok: true` as well as curl success;
+  bound responses and suppress raw API diagnostics and credentials.
+- Distinguish PRESENT, NOT_APPLICABLE and DISCOVERY_FAILED; report failures as
+  ERROR and include compact execution/discovery counts.
+- Strengthen causal DST and real-parser integration tests; retain Python 3.6.8
+  runtime compatibility and Python 3.12 tests, with no external Python packages.
+- Synchronize severity, parser, notification and installation documentation.
+
 ## v0.5.2 — 2026-09-20
 
 - Report expected/configured/missing/stale webroot counts from actual set

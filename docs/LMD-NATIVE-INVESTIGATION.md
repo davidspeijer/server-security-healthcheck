@@ -197,3 +197,29 @@ security-relevant evidence. Current policy continues to be checked separately.
 
 Additional pinned source:
 [daily cleanup](https://github.com/rfxn/linux-malware-detect/blob/88dd694891ac52a11a6e6ac45546545d5b1c813f/cron.daily#L35-L70).
+
+
+## F15–F22 bounded snapshots (v0.5.3)
+
+Runtime helpers require Python >=3.6 (production: 3.6.8). `bounded_input.py`
+rejects nonregular inputs, permits symlinks to regular targets, checks the opened
+file descriptor, and bounds physical size (64 MiB), expanded/snapshot bytes
+(128 MiB), records (64 KiB, at most 1,000,000 per file), and parser time (20 s).
+Small trusted environment overrides support tests; see README for exact names.
+NUL in shell-bound metadata/configuration is rejected. Native index, metadata,
+selection and hit loops also enforce elapsed processing budgets before using
+partial evidence. A processing timeout gives ERROR and cannot prove recovery.
+
+Native index, lifecycle and TSV records are read through a private temporary
+snapshot. No source files are modified. Scanner batching shares a bounded log
+snapshot across intervals but keeps marker/host/invocation/access-error state
+separate for each scan. Invalid compressed input fails every dependent result;
+interval-specific malformed evidence retains the established interval policy.
+No cache survives the healthcheck invocation.
+
+Read/resource failure cannot establish PASS or recovery. Scanner UNKNOWN remains
+CRITICAL; native/metadata snapshot failures are execution ERROR. Existing positive
+finding, EICAR allowlist, strict chronology and clean-recovery rules remain intact.
+Control bytes are escaped when displaying parsed values; classification uses the
+original values. Embedded newlines are not representable in native line-oriented
+TSV: malformed positive-hit records remain unclassified/CRITICAL.

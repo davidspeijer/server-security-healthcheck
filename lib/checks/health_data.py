@@ -1,15 +1,43 @@
 #!/usr/bin/env python3
 """Bounded, read-only parsers. Python 3.6; never execute input as code."""
 import datetime
+import io
 import json
 import os
 import re
 import shlex
+import stat
 import sys
+sys.dont_write_bytecode = True  # Runtime parsing must not write installed libraries.
+from bounded_input import text as read_text, stdin_text, arm_timeout, BudgetExceeded
 
 
 class Invalid(ValueError):
     pass
+
+
+def file_state(path):
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        if os.path.islink(path):
+            raise Invalid('broken input symlink')
+        return 'ABSENT'
+    if not stat.S_ISREG(info.st_mode):
+        raise Invalid('input is not regular')
+    return 'PRESENT'
+
+
+def directory_state(path):
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        if os.path.islink(path):
+            raise Invalid('broken installation directory symlink')
+        return 'ABSENT'
+    if not stat.S_ISDIR(info.st_mode) or not os.access(path, os.R_OK | os.X_OK):
+        raise Invalid('installation directory unavailable')
+    return 'PRESENT'
 
 
 def timestamp(value, now):
@@ -48,7 +76,7 @@ def audit(path, event, hours, now):
     count = 0
     if not os.path.isfile(path):
         raise Invalid('audit source missing or not a regular file')
-    with open(path, encoding='utf-8') as stream:
+    with io.StringIO(read_text(path)) as stream:
         for line in stream:
             if not line.strip():
                 continue
@@ -207,7 +235,7 @@ def monitor(text, root, sysconfig, default):
             if optional:
                 continue
             raise
-        with open(path, encoding='utf-8') as stream:
+        with io.StringIO(read_text(path)) as stream:
             for line in stream:
                 line = line.strip()
                 if not line or line.startswith(('#', ';')):
@@ -271,7 +299,7 @@ def clam_config(text, explicit, instance):
 
 def database(path, default):
     values = []
-    with open(path, encoding='utf-8') as stream:
+    with io.StringIO(read_text(path)) as stream:
         for line in stream:
             line = line.strip()
             if not line or line.startswith('#'):
@@ -466,7 +494,7 @@ def daily_contract(path, root):
         return [line.strip() for line in text.splitlines()
                 if line.strip() and not line.lstrip().startswith('#')]
     expected = DAILY_STOCK_2_0_1.replace("inspath='/usr/local/maldetect'", "inspath='" + root + "'", 1)
-    with open(path, encoding='utf-8') as stream:
+    with io.StringIO(read_text(path)) as stream:
         if normalized(stream.read()) != normalized(expected):
             raise Invalid('unsupported full daily contract')
     return 'supported full daily contract'
@@ -474,27 +502,49 @@ def daily_contract(path, root):
 
 def main():
     mode = sys.argv[1]
-    if mode == 'audit':
+    if mode == 'file-state':
+        result = file_state(sys.argv[2])
+    elif mode == 'first-line':
+        result = read_text(sys.argv[2]).partition('\n')[0]
+    elif mode == 'directory':
+        result = directory_state(sys.argv[2])
+    elif mode == 'final-newline':
+        result = '1' if read_text(sys.argv[2]).endswith('\n') else '0'
+    elif mode == 'bounded':
+        result = read_text(sys.argv[2])
+    elif mode == 'telegram-prefix':
+        import codecs
+        result = codecs.getincrementaldecoder('utf-8')().decode(sys.stdin.buffer.read(3500), final=False)
+    elif mode == 'telegram':
+        response = sys.stdin.buffer.read(65537)
+        if len(response) > 65536:
+            raise Invalid('Telegram response budget exceeded')
+        item = json.loads(response.decode('utf-8'), object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        if not isinstance(item, dict) or item.get('ok') is not True:
+            raise Invalid('Telegram application response rejected')
+        result = ''
+    elif mode == 'audit':
         result = audit(sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]))
     elif mode == 'freshclam':
-        result = freshclam(sys.stdin.read(), int(sys.argv[2]))
+        result = freshclam(stdin_text(), int(sys.argv[2]))
     elif mode == 'monitor':
-        result = monitor(sys.stdin.read(), *sys.argv[2:5])
+        result = monitor(stdin_text(), *sys.argv[2:5])
     elif mode == 'clam-config':
-        result = clam_config(sys.stdin.read(), *sys.argv[2:4])
+        result = clam_config(stdin_text(), *sys.argv[2:4])
     elif mode == 'database':
         result = database(*sys.argv[2:4])
     elif mode == 'daily':
         result = daily_contract(*sys.argv[2:4])
     else:
         raise Invalid('unknown parser')
-    print(result)
+    sys.stdout.buffer.write((str(result) + '\n').encode('utf-8'))
 
 
 if __name__ == '__main__':
     try:
+        arm_timeout()
         main()
-    except (ValueError, OSError, UnicodeError, IndexError) as error:
+    except (ValueError, OSError, UnicodeError, IndexError, BudgetExceeded) as error:
         # No raw records/config contents in diagnostics.
         print('Source read/parse failure: ' + (str(error) if isinstance(error, Invalid) else type(error).__name__), file=sys.stderr)
         sys.exit(1)

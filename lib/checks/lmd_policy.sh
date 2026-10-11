@@ -22,14 +22,18 @@ _lmd_config_get() {
         return 0
     fi
     [ -f "$1" ] && [ -r "$1" ] || return 3
-    _lmd_config_stream "$2" < "$1"
+    local contents
+    contents="$(hc_data_parse bounded "$1" 2>/dev/null)" || return 3
+    _lmd_config_stream "$2" <<< "$contents"
 }
 
 _lmd_config_stream() {
+    local parse_started=$SECONDS
     local wanted="$1" cache_file="${2:-}" line key value quote rest entry found=0 invalid=0
     local assignment='^(export[[:space:]]+)?([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=(.*)$'
     value=''
     while IFS= read -r line || [ -n "$line" ]; do
+        if hc_budget_expired "$parse_started"; then return 3; fi
         line="${line%$'\r'}"
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
@@ -81,11 +85,15 @@ _lmd_compat_load() {
 # Patterns below intentionally contain literal shell variable syntax.
 # shellcheck disable=SC2016
 _lmd_compat_compute() {
+    local parse_started=$SECONDS
+    local contents
     local file="$1" line mode='' target='' source='' guard='' stage=0 value rc condition
     local fallback='^if \[ ! "\$([a-zA-Z_][a-zA-Z0-9_]*)" \] && \[ "\$([a-zA-Z_][a-zA-Z0-9_]*)" \]; then$'
     local assignment='^(export[[:space:]]+)?([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*='
     [ -f "$file" ] && [ -r "$file" ] || return 3
+    contents="$(hc_data_parse bounded "$file" 2>/dev/null)" || return 3
     while IFS= read -r line || [ -n "$line" ]; do
+        if hc_budget_expired "$parse_started"; then return 3; fi
         line="${line%$'\r'}"
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
@@ -135,7 +143,7 @@ _lmd_compat_compute() {
         else
             return 2
         fi
-    done < "$file"
+    done <<< "$contents"
     [ "$stage" = 0 ] || return 2
     return 0
 }
@@ -220,9 +228,10 @@ _lmd_daily_contract() {
     [ -f "$file" ] && [ -r "$file" ] && [ -x "$file" ] || return 1
     # Full-file bounded contract: no extra statements, wrappers or control flow.
     # Syntax checking parses only; it never executes the script.
-    bash -n "$file" 2>/dev/null || return 1
-    local actual expected
-    actual="$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$file")" || return 1
+    local actual expected contents
+    contents="$(hc_data_parse bounded "$file" 2>/dev/null)" || return 1
+    bash -n <<< "$contents" 2>/dev/null || return 1
+    actual="$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' <<< "$contents")" || return 1
     expected="$(cat <<EOF
 inspath='${LMD_DIR:-/usr/local/maldetect}'
 intcnf="\$inspath/internals/internals.conf"
@@ -261,6 +270,8 @@ _lmd_daily_bindings() {
     [ -r "$file" ] || return 1
     # Resolve only the documented variable bindings, not arbitrary shell paths.
     # This prevents treating a same-named but unused override file as effective.
+    local contents
+    contents="$(hc_data_parse bounded "$file" 2>/dev/null)" || return 1
     awk '
         BEGIN {
             want["confpath"]="$inspath"; want["cnffile"]="conf.maldet"
@@ -272,7 +283,7 @@ _lmd_daily_bindings() {
         /^[[:space:]]*#/ {next}
         {s=$0; gsub(/[[:space:]"\047]/,"",s); p=index(s,"="); if(p) {k=substr(s,1,p-1); if(k in want) {seen[k]=1; if(substr(s,p+1)!=want[k])bad=1}}}
         END {for(k in want)if(!seen[k])bad=1; exit bad}
-    ' "$file"
+    ' <<< "$contents"
 }
 
 # Tokenize only simple literal cron commands. Quotes preserve spaces; shell
@@ -317,10 +328,14 @@ _lmd_cron_redirects() {
 }
 
 _lmd_check_cron_rule() {
+    local parse_started=$SECONDS
+    local contents
     local file="$1" kind="$2" expected="$3" line min hour dom month dow user command schedule count=0 bad=0 index
     local binary="${LMD_DIR:-/usr/local/maldetect}/maldet"
     [ -r "$file" ] && [ -f "$file" ] || { hc_warn "LMD $kind cron file unavailable: $file"; return; }
+    contents="$(hc_data_parse bounded "$file" 2>/dev/null)" || { hc_warn "LMD cron input UNKNOWN: $file"; return; }
     while IFS= read -r line || [ -n "$line" ]; do
+        if hc_budget_expired "$parse_started"; then hc_warn 'LMD cron processing budget exceeded'; return; fi
         line="$(_lmd_trim "$line")"
         [[ -z "$line" || "$line" = \#* ]] && continue
         # Environment directives can change cron interpretation; do not silently
@@ -365,9 +380,11 @@ _lmd_check_cron_rule() {
         if ! _lmd_cron_redirects "$index"; then
             hc_warn "LMD $kind cron has unsupported trailing arguments/commands ($file)"; bad=1
         fi
-    done < "$file"
+    done <<< "$contents"
     if [ "$count" -ne 1 ]; then hc_warn "LMD $kind cron: expected exactly one active job, found $count ($file)"; bad=1; fi
-    if [ -n "$(tail -c 1 "$file")" ]; then hc_warn "LMD $kind cron: missing final newline ($file)"; bad=1; fi
+    local final_newline
+    final_newline="$(hc_data_parse final-newline "$file" 2>/dev/null)" || final_newline=unknown
+    if [ "$final_newline" != 1 ]; then hc_warn "LMD $kind cron: missing final newline ($file)"; bad=1; fi
     [ "$bad" -ne 0 ] || hc_status PASS "LMD $kind cron definition matches expected schedule and command"
     return 0
 }
@@ -448,7 +465,9 @@ _lmd_check_configuration() {
         if [ -f "$file" ] && [ -r "$file" ]; then
             # The file argument identifies the in-memory cache; no file is written.
             # shellcheck disable=SC2094
-            _lmd_config_stream '' "$file" < "$file"; status=$?
+            if value="$(hc_data_parse bounded "$file" 2>/dev/null)"; then
+                _lmd_config_stream '' "$file" <<< "$value"; status=$?
+            else status=3; fi
         else
             status=3
         fi

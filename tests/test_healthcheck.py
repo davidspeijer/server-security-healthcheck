@@ -380,6 +380,7 @@ systemctl() {{
         cat:clamav-freshclam-once.timer) return {0 if timer else 1} ;;
         cat:clamav-freshclam.service) return {0 if daemon else 1} ;;
         is-active:--quiet)
+            if [ "$3" = -- ]; then shift; fi
             if [ "$3" = clamav-freshclam-once.timer ]; then return {0 if active else 1}; fi ;;
         is-failed:--quiet) return {0 if failed else 1} ;;
     esac
@@ -434,7 +435,7 @@ CHECK_LMD=0
     def test_version(self):
         result = self.main('', ['--version'])
         self.assertEqual(result.returncode, 0)
-        self.assertIn('v0.5.2', result.stdout)
+        self.assertIn('v0.5.3', result.stdout)
 
     def test_unknown_argument(self):
         self.assertEqual(self.main('', ['--unknown']).returncode, 2)
@@ -448,7 +449,7 @@ CHECK_LMD=0
 NOTIFY_TELEGRAM=1
 TELEGRAM_BOT_TOKEN=123:fixture_token
 TELEGRAM_CHAT_ID=123
-curl() {{ cat > {Q(str(self.work / 'curl.args'))}; }}
+curl() {{ cat > {Q(str(self.work / 'curl.args'))}; printf '%s' '{{"ok":true}}'; }}
 printf -v long '%5000s' x
 notify_telegram "$long"
 ''')
@@ -602,7 +603,7 @@ notify_telegram "$long"
         # Exercise the real notification backend without network access.
         with (library / 'notify/telegram.sh').open('a') as file:
             file.write('\ncurl() { local input; input="$(cat)"; printf "%b" "$input" > ' + Q(str(marker)) +
-                       f'; return {curl_status}; }}\n')
+                       f'; printf \'%s\' \'{{"ok":true}}\'; return {curl_status}; }}\n')
         (library / 'checks/error_fixture.sh').write_text(
             'hc_register_check error_fixture\ncheck_error_fixture() {\n' + body + '\n}\n')
         config = f'NOTIFY_TELEGRAM={int(enabled)}\nTELEGRAM_BOT_TOKEN=123:fixture_token\nTELEGRAM_CHAT_ID=123\n'
@@ -1074,7 +1075,7 @@ _lmd_check_configuration
         shutil.copytree(ROOT / 'lib', library)
         marker = self.work / 'captured curl arguments'
         with (library / 'notify/telegram.sh').open('a') as file:
-            file.write('\ncurl() { local input; input="$(cat)"; printf "%b" "$input" > ' + Q(str(marker)) + '; }\n')
+            file.write('\ncurl() { local input; input="$(cat)"; printf "%b" "$input" > ' + Q(str(marker)) + '; printf \'%s\' \'{"ok":true}\'; }\n')
         (library / 'checks/notification_fixture.sh').write_text(
             'hc_register_check notification_fixture\n'
             'check_notification_fixture() { local i; for i in {1..100}; do hc_warn "Configuration policy drift in setting number $i requiring review"; done; hc_status CRITICAL "LMD full scan found malware"; }\n')
@@ -1684,10 +1685,15 @@ class ScannerReliabilityTests(unittest.TestCase):
         end = start + 3 * 3600
         (self.lmd / 'logs/clamscan_log').write_text(
             'Oct 25 2026 02:30:00 host clamscan start\n'
+            'Oct 25 2026 02:30:30 host executed: /usr/bin/clamscan --infected -f /tmp/files\n'
             'Oct 25 2026 02:31:00 host clamscan end return 0\n')
         output = self.run_shell(f'python3 "$LMD_SCANNER_PARSER" {Q(str(self.lmd / "logs"))} {start} {end}')
         self.assertEqual(output, 'unknown\t-\t0\t0\t0\n')
-
+        # Causal control: identical scanner grammar is healthy on the prior day.
+        logfile = self.lmd / 'logs/clamscan_log'
+        logfile.write_text(logfile.read_text().replace('Oct 25', 'Oct 24'))
+        output = self.run_shell(f'python3 "$LMD_SCANNER_PARSER" {Q(str(self.lmd / "logs"))} {start-86400} {end-86400}')
+        self.assertEqual(output, 'clean\t0\t0\t0\t0\n')
 
 
 if __name__ == '__main__':

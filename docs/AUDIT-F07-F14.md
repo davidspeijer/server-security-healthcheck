@@ -252,3 +252,13 @@ Geen staged wijzigingen, commit of push.
 ?? lib/checks/health_data.py
 ?? tests/test_audit_round2.py
 ```
+
+
+## Vervolg F15–F22
+
+Dit document beschrijft de afgeronde F07–F14-ronde. Vanaf v0.5.3 controleert
+Telegram bovendien de JSON-response; de eerdere transport-only beperking is
+opgelost. Bestandslezers zijn begrensd en scanneranalyse gebruikt batchsnapshots.
+Zie [AUDIT-F15-F22.md](AUDIT-F15-F22.md) voor de actuele installatie-, discovery-,
+resource- en presentatiecontracten. De hier beschreven securitysemantiek blijft
+behouden; de nieuwe ronde vervangt het toenmalige installatiemechanisme.

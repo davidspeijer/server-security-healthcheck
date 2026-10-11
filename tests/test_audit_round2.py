@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import unittest
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib/checks"))
 from unittest import mock
 import test_healthcheck as fixture
 
@@ -101,7 +103,7 @@ source {Q(str(fixture.ROOT / 'lib/notify/telegram.sh'))}
 NOTIFY_TELEGRAM=1
 TELEGRAM_BOT_TOKEN={Q(token)}
 TELEGRAM_CHAT_ID={Q(chat)}
-curl() {{ printf '%s\\n' "$@" > {Q(str(args))}; cat > {Q(str(request))}; printf '%s' "$TELEGRAM_BOT_TOKEN" >&2; return {status}; }}
+curl() {{ printf '%s\\n' "$@" > {Q(str(args))}; cat > {Q(str(request))}; printf '%s' "$TELEGRAM_BOT_TOKEN" >&2; printf '%s' '{{"ok":true}}'; return {status}; }}
 {'hc_have() { return 1; }' if missing else ''}
 {'set -x' if trace else ''}
 notify_telegram {Q(message)}
@@ -211,7 +213,7 @@ class AuditTests(Fixtures):
         with self.assertRaises(ValueError): data.audit('/no/fixture/audit','threat_detected',24,NOW)
     def test_read_failure(self):
         path=self.audit_source(self.event())
-        with mock.patch('builtins.open', side_effect=PermissionError('fixture')):
+        with mock.patch('bounded_input.os.open', side_effect=PermissionError('fixture')):
             with self.assertRaises(OSError): data.audit(str(path),'threat_detected',24,NOW)
     def test_parser_dependency_failure(self):
         output=self.run_shell('hc_data_parse() { return 1; }; hc_json_event_count_since threat_detected /fixture 24',1)
@@ -447,7 +449,7 @@ class TelegramTests(Fixtures):
         self.assertEqual(result.returncode,0); self.assertNotIn('secret_fixture_token',result.stdout+result.stderr)
     def test_config_escaping(self):
         _,_,request=self.telegram(message='quote " backslash \\ newline\nnext'); config=request.read_text(); self.assertIn('\\"',config); self.assertIn('\\\\',config); self.assertIn('\\nnext',config)
-    def test_application_ok_false_out_of_scope(self):
+    def test_valid_application_response_required(self):
         result,_,_=self.telegram(); self.assertEqual(result.returncode,0)
 
     def test_actual_mock_subprocess_argv_and_tracing(self):
@@ -458,7 +460,7 @@ class TelegramTests(Fixtures):
                         'with open(os.environ["MOCK_ARGV"],"w") as f: f.write(repr(sys.argv))\n'+
                         'request=sys.stdin.read()\n'+
                         'with open(os.environ["MOCK_INPUT"],"w") as f: f.write(request)\n'+
-                        'sys.stdout.write(request); sys.stderr.write(request)\n')
+                        "sys.stdout.write('{\"ok\":true}'); sys.stderr.write(request)\n")
         curl.chmod(0o700)
         args=self.work/'actual.argv'; request=self.work/'actual.stdin'
         env=dict(self.env,PATH=str(bindir)+os.pathsep+self.env['PATH'],MOCK_ARGV=str(args),MOCK_INPUT=str(request))

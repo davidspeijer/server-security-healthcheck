@@ -21,7 +21,18 @@ _lmd_scanner_reliability() {
     if ! hc_have python3 || [ ! -r "$LMD_SCANNER_PARSER" ]; then
         hc_status ERROR 'LMD scanner reliability parser unavailable (requires Python >=3.6)'; return
     fi
-    if ! output="$(python3 "$LMD_SCANNER_PARSER" "${LMD_DIR:-/usr/local/maldetect}/logs" "$started" "$ended" "${LMD_SOURCE_SESSION_DIR:-${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}}" 2>/dev/null)"; then
+    if declare -p LMD_SCANNER_CACHE >/dev/null 2>&1; then
+        if [ "$LMD_SCANNER_CACHE_READY" = 0 ]; then
+            LMD_SCANNER_CACHE_READY=1
+            if output="$(python3 "$LMD_SCANNER_PARSER" --batch "${LMD_DIR:-/usr/local/maldetect}/logs" "${LMD_SOURCE_SESSION_DIR:-${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}}" "${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}" 2>/dev/null)"; then
+                local cache_key cache_value
+                while IFS=$'\t' read -r cache_key cache_value; do
+                    [ -z "$cache_key" ] || LMD_SCANNER_CACHE["$cache_key"]="$cache_value"
+                done <<< "$output"
+            fi
+        fi
+        output="${LMD_SCANNER_CACHE[$started:$ended]:-unknown$'\t'-$'\t'0$'\t'0$'\t'0}"
+    elif ! output="$(python3 "$LMD_SCANNER_PARSER" "${LMD_DIR:-/usr/local/maldetect}/logs" "$started" "$ended" "${LMD_SOURCE_SESSION_DIR:-${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}}" 2>/dev/null)"; then
         hc_status ERROR 'LMD scanner reliability parser failed'; return
     fi
     IFS=$'\t' read -r result code access volatile other <<< "$output"
@@ -44,7 +55,13 @@ _lmd_scanner_reliability() {
 # Never source metadata: it is append-only key=value data, not shell code.
 # Exact key matching and last assignment wins (notably running -> completed).
 _lmd_meta_get() {
-    awk -v key="$2" 'index($0, key "=")==1 {v=substr($0,length(key)+2); sub(/\r$/, "", v)} END {print v}' "$1"
+    if declare -p LMD_META_VALUES >/dev/null 2>&1; then
+        printf '%s\n' "${LMD_META_VALUES[$1|$2]:-}"
+        return
+    fi
+    local contents
+    contents="$(hc_data_parse bounded "$1" 2>/dev/null)" || return 1
+    awk -v key="$2" 'index($0, key "=")==1 {v=substr($0,length(key)+2); sub(/\r$/, "", v)} END {print v}' <<< "$contents"
 }
 
 _lmd_event_log_path() {
@@ -62,11 +79,12 @@ _lmd_event_log_path() {
 # must not hide older update events. Logs are assumed append-ordered; timestamps
 # are local server time for legacy LMD, or explicit ISO timestamps when supplied.
 _lmd_last_event() {
-    local log="$1" tag="$2" pattern="$3" line timestamp
+    local log="$1" tag="$2" pattern="$3" line timestamp contents
+    contents="$(hc_data_parse bounded "$log" 2>/dev/null)" || { printf '%s\n' unknown; return 1; }
     [ -r "$log" ] || return 1
     line="$(awk -v tag="{$tag}" -v pattern="$pattern" '
         index($0,tag) {body=substr($0,index($0,tag)+length(tag)); if (tolower(body) ~ pattern) last=$0}
-        END {print last}' "$log")"
+        END {print last}' <<< "$contents")"
     [ -n "$line" ] || return 1
     if [[ "$line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]; then
         timestamp="${line%% *}"
@@ -87,6 +105,8 @@ _lmd_failure_unresolved() {
     local log="$1" tag="$2" success_pattern="$3" failure_pattern="$4" failure="$5" success="$6"
     [ "$failure" -lt "$success" ] && return 1
     [ "$failure" -gt "$success" ] && return 0
+    local contents
+    contents="$(hc_data_parse bounded "$log" 2>/dev/null)" || return 0
     # Logs only record seconds. On ties use append order, so a failure after a
     # same-second success remains visible and a later success really clears it.
     awk -v tag="{$tag}" -v good="$success_pattern" -v bad="$failure_pattern" '
@@ -131,7 +151,15 @@ _lmd_check_service() {
 _lmd_check_events() {
     local threats failures audit="${LMD_AUDIT:-/var/log/maldet/audit.log}"
     # The stock audit source is optional; an explicitly selected source is required.
-    if [ ! -e "$audit" ] && [ -z "${LMD_AUDIT:-}" ]; then return 0; fi
+    if [ -z "${LMD_AUDIT:-}" ]; then
+        local audit_state
+        if ! audit_state="$(hc_data_parse file-state "$audit" 2>/dev/null)" ||
+           [[ "$audit_state" != ABSENT && "$audit_state" != PRESENT ]]; then
+            hc_status ERROR 'LMD audit source discovery failed; event counts UNKNOWN'
+            return
+        fi
+        if [ "$audit_state" = ABSENT ]; then hc_detail 'SKIPPED: optional LMD audit source absent'; return; fi
+    fi
     if ! threats="$(hc_json_event_count_since threat_detected "$audit" "${LOOKBACK_HOURS:-24}")" ||
        ! failures="$(hc_json_event_count_since alert_failed "$audit" "${LOOKBACK_HOURS:-24}")"; then
         hc_status ERROR 'LMD audit source read/parse failure; event counts UNKNOWN'
@@ -158,7 +186,7 @@ _lmd_check_signature_updater() {
     if hc_age_seconds "$updated" >/dev/null && [ "$updated" -ge "$last" ]; then last="$updated"; result=updated; fi
     if hc_age_seconds "$current" >/dev/null && [ "$current" -ge "$last" ]; then last="$current"; result='already current'; fi
     if [ -r "${LMD_DIR:-/usr/local/maldetect}/sigs/maldet.sigs.ver" ]; then
-        IFS= read -r version < "${LMD_DIR:-/usr/local/maldetect}/sigs/maldet.sigs.ver" || true
+        version="$(hc_data_parse first-line "${LMD_DIR:-/usr/local/maldetect}/sigs/maldet.sigs.ver" 2>/dev/null)" || { hc_status ERROR 'LMD signature version input UNKNOWN'; return; }
         hc_detail "LMD local signature version: ${version:-unknown}"
     else
         hc_warn 'LMD local signature version unavailable'
@@ -209,12 +237,20 @@ _lmd_check_program_updater() {
 
 _lmd_check_webroots() {
     hc_enabled "${CHECK_DIRECTADMIN_WEBROOTS:-0}" || return 0
-    local temporary actual monitored missing stale expected_count configured_count covered missing_count stale_count
+    local temporary actual monitored missing stale expected_count configured_count covered missing_count stale_count list_contents
     local list="${LMD_WEBROOT_LIST:-${LMD_MONITOR_LIST:-${LMD_DIR:-/usr/local/maldetect}/directadmin-webroots}}"
+    list_contents="$(hc_data_parse bounded "$list" 2>/dev/null)" || { hc_status ERROR "LMD monitor list input UNKNOWN: $list"; return; }
     [ -r "$list" ] || { hc_warn "LMD monitor list unavailable: $list"; return; }
     hc_have rmdir || { hc_status ERROR 'LMD coverage dependency missing: rmdir'; return; }
     temporary="$(mktemp -d)" || { hc_status ERROR 'Cannot create coverage scratch directory'; return; }
     actual="$temporary/actual" monitored="$temporary/monitored"
+    if ! printf '%s\n' "$list_contents" > "$temporary/input"; then
+        hc_status ERROR 'Cannot write LMD coverage input snapshot'
+        rm -f -- "$temporary/input"
+        rmdir -- "$temporary" 2>/dev/null || true
+        return
+    fi
+    list="$temporary/input"
     # Both sets use the same bytewise collation. One path per line matches LMD's
     # own --fromfile format; embedded newlines are not representable in that format.
     if ! find "${DIRECTADMIN_HOME:-/home}" -mindepth 4 -maxdepth 4 -type d \
@@ -248,11 +284,11 @@ _lmd_check_webroots() {
        Configured: $((configured_count))
        Missing: $missing_count
        Stale: $stale_count"
-            [ -z "$missing" ] || printf '       Missing paths:\n%s\n' "$missing"
-            [ -z "$stale" ] || printf '       Stale/out-of-scope entries:\n%s\n' "$stale"
+            [ -z "$missing" ] || printf '       Missing paths:\n%s\n' "$(hc_present "$missing")"
+            [ -z "$stale" ] || printf '       Stale/out-of-scope entries:\n%s\n' "$(hc_present "$stale")"
         fi
     fi
-    rm -f -- "$temporary/actual" "$temporary/monitored" "$temporary/discovered"
+    rm -f -- "$temporary/actual" "$temporary/monitored" "$temporary/discovered" "$temporary/input"
     rmdir -- "$temporary" || hc_status ERROR 'Could not remove coverage scratch directory'
 }
 
@@ -270,6 +306,7 @@ _lmd_check_hits() {
     local file="$1" hits="$2" quarantine="$3" line signature path quarantine_path kind
     local count=0 tests=0 real=0 malformed=0 owner context="${4:-selected}" header_hits line_number=0 metadata="${5:-}" header_start header_end field value
     local -a lmd_fields
+    local contents parse_started=$SECONDS
     LMD_HITS_VALID=0
     hc_uint "$hits" || { hc_warn 'LMD full scan hit count unavailable/invalid'; malformed=1; }
     if [ "$hits" = 0 ] && [ ! -e "$file" ] && [ ! -L "$file" ]; then
@@ -279,7 +316,8 @@ _lmd_check_hits() {
         return 0
     fi
     [ -f "$file" ] && [ -r "$file" ] || { hc_status CRITICAL "LMD full scan reports $hits hit(s), but session details are unavailable: $file"; return; }
-    IFS= read -r line < "$file" || true
+    contents="$(hc_data_parse bounded "$file" 2>/dev/null)" || { hc_status ERROR 'LMD hit session input UNKNOWN: read/resource limit failure'; return; }
+    IFS= read -r line <<< "$contents" || true
     [[ "$line" = '#LMD:v1'$'\t'* ]] || { hc_status CRITICAL 'LMD hit session format unknown; detections cannot be classified'; return; }
     _lmd_split_tabs "$line"
     header_hits="${lmd_fields[11]:-unknown}"
@@ -318,6 +356,7 @@ _lmd_check_hits() {
     # First columns: signature, file, quarantine path, type, type label. Split
     # explicitly: read with tab IFS collapses empty fields and can shift columns.
     while IFS= read -r line || [ -n "$line" ]; do
+        if hc_budget_expired "$parse_started"; then hc_status ERROR 'LMD hit processing budget exceeded'; return; fi
         line_number=$((line_number + 1))
         [ "$line_number" -ne 1 ] && [ -n "$line" ] || continue
         _lmd_split_tabs "$line"
@@ -340,8 +379,8 @@ _lmd_check_hits() {
         # version-dependent extra TSV column. This is not the historical owner.
         owner="$(stat -c %U -- "$path" 2>/dev/null || true)"
         printf '       Signature: %s\n       File: %s\n       Type: %s; current owner: %s; quarantine path: %s\n' \
-            "$signature" "$path" "${kind:-unknown}" "${owner:-unknown}" "${quarantine_path:--}"
-    done < "$file"
+            "$(hc_present "$signature")" "$(hc_present "$path")" "$(hc_present "${kind:-unknown}")" "$(hc_present "${owner:-unknown}")" "$(hc_present "${quarantine_path:--}")"
+    done <<< "$contents"
     if [ "$real" -gt 0 ]; then
         hc_status CRITICAL "LMD full scan found malware: $real non-test detection(s), $tests EICAR/test detection(s)"
         if [ "$quarantine" = 0 ]; then
@@ -476,6 +515,7 @@ _lmd_missing_session_expired() {
 # upstream trap_exit finalizes killed scans through the same report writer.
 _lmd_native_records() {
     local directory="$1" scratch="$2" expected="$3" now="$4"
+    local parse_started=$SECONDS
     local line header id session started ended state meta value bad field retention_days
     local -a lmd_fields row hdr
     retention_days="$(_lmd_session_retention_days || true)"
@@ -488,6 +528,7 @@ _lmd_native_records() {
         *) LMD_NATIVE_VALID=0; hc_warn 'LMD native session.index header invalid; completion cannot be established'; return ;;
     esac
     while IFS= read -r line || [ -n "$line" ]; do
+        if hc_budget_expired "$parse_started"; then LMD_NATIVE_VALID=0; hc_status ERROR 'LMD native parsing budget exceeded'; return 1; fi
         [[ "$line" = \#* || -z "$line" ]] && continue
         _lmd_split_tabs "$line"; row=("${lmd_fields[@]}")
         if [[ ! "${row[0]}" =~ ^[0-9]{6}-[0-9]{4}\.[0-9]+$ ]] ||
@@ -622,9 +663,29 @@ _lmd_native_records() {
 }
 
 _lmd_check_fullscan() {
+    if ! hc_have python3 || [ ! -r "$LMD_SCANNER_PARSER" ]; then
+        hc_status ERROR 'LMD scanner reliability parser unavailable (requires Python >=3.6)'; return
+    fi
+    local original="${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}" snapshot_dir
+    snapshot_dir="$(mktemp -d)" || { hc_status ERROR 'Cannot create metadata snapshot'; return; }
+    if ! python3 "${LMD_SCANNER_PARSER%/*}/bounded_input.py" --snapshot "$original" "$snapshot_dir" 2>/dev/null; then
+        hc_status ERROR 'LMD metadata input UNKNOWN: read/resource limit failure'
+        rm -rf -- "$snapshot_dir"
+        return
+    fi
+    local LMD_SESSION_DIR="$snapshot_dir" LMD_SOURCE_SESSION_DIR="$original"
+    _lmd_check_fullscan_data
+    rm -rf -- "$snapshot_dir"
+}
+
+_lmd_check_fullscan_data() {
     local original="${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}"
     local scratch file id
-    local LMD_SOURCE_SESSION_DIR="$original" LMD_NATIVE_VALID=1
+    local -A LMD_SCANNER_CACHE=()
+    local LMD_SCANNER_CACHE_READY=0
+    local -A LMD_META_VALUES=()
+    _lmd_metadata_cache "$original" || { hc_status ERROR 'LMD metadata processing budget exceeded'; return; }
+    local LMD_SOURCE_SESSION_DIR="${LMD_SOURCE_SESSION_DIR:-$original}" LMD_NATIVE_VALID=1
     # Preserve the legacy-only path for older installations. A native index
     # always takes precedence over lifecycle records for the same scan ID.
     if [ ! -e "$original/session.index" ]; then
@@ -633,7 +694,11 @@ _lmd_check_fullscan() {
     fi
     hc_have rmdir || { hc_status ERROR 'LMD native fullscan dependency missing: rmdir'; return; }
     scratch="$(mktemp -d)" || { hc_status ERROR 'Cannot create LMD metadata scratch directory'; return; }
-    _lmd_native_records "$original" "$scratch" "${LMD_EXPECTED_FULLSCAN_PATH:-/home/?/domains/?/public_html/}" "$(date +%s)"
+    if ! _lmd_native_records "$original" "$scratch" "${LMD_EXPECTED_FULLSCAN_PATH:-/home/?/domains/?/public_html/}" "$(date +%s)"; then
+        rm -f -- "$scratch"/scan.meta.* "$scratch"/seen.*
+        rmdir -- "$scratch" 2>/dev/null || true
+        return
+    fi
     for file in "$original"/scan.meta.*; do
         [ -f "$file" ] && [ -r "$file" ] || continue
         id="${file##*/scan.meta.}"
@@ -649,9 +714,25 @@ _lmd_check_fullscan() {
     rmdir -- "$scratch" || hc_status ERROR 'Could not remove LMD metadata scratch directory'
 }
 
+_lmd_metadata_cache() {
+    local cache_file cache_line cache_key cache_value parse_started=$SECONDS
+    for cache_file in "$1"/scan.meta.*; do
+        [ -f "$cache_file" ] || continue
+        while IFS= read -r cache_line || [ -n "$cache_line" ]; do
+            hc_budget_expired "$parse_started" && return 1
+            [[ "$cache_line" = *=* ]] || continue
+            cache_key="${cache_line%%=*}" cache_value="${cache_line#*=}"
+            LMD_META_VALUES["$cache_file|$cache_key"]="${cache_value%$'\r'}"
+        done < "$cache_file"
+    done
+}
+
 _lmd_select_fullscan() {
+    local parse_started=$SECONDS
     local directory="${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}"
     local expected="${LMD_EXPECTED_FULLSCAN_PATH:-/home/?/domains/?/public_html/}"
+    local -A LMD_META_VALUES=()
+    _lmd_metadata_cache "$directory" || { hc_status ERROR 'LMD metadata processing budget exceeded'; return; }
     local file path started completed order state latest='' latest_order=0 latest_completed='' completed_order=0
     local invalid=0 mismatched=0 now age runtime max_age
     local LMD_HITS_VALID=0 LMD_SCAN_VALID=0 completion_ties=0 session completion_message=''
@@ -662,6 +743,7 @@ _lmd_select_fullscan() {
     [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || { hc_warn "LMD full scan session directory unavailable: $directory"; return; }
     # Filename mtime is deliberately ignored. The configured target is literal.
     for file in "$directory"/scan.meta.*; do
+        if hc_budget_expired "$parse_started"; then hc_status ERROR 'LMD selection processing budget exceeded'; return; fi
         [ -e "$file" ] || continue
         [ -f "$file" ] && [ -r "$file" ] || { invalid=$((invalid + 1)); continue; }
         path="$(_lmd_meta_get "$file" path)"
@@ -721,6 +803,7 @@ _lmd_select_fullscan() {
     if [ "$completion_ties" = 1 ]; then
         hc_detail 'LMD completion order UNKNOWN; all tied reports remain relevant'
         for file in "$directory"/scan.meta.*; do
+        if hc_budget_expired "$parse_started"; then hc_status ERROR 'LMD selection processing budget exceeded'; return; fi
             [ -f "$file" ] && [ -r "$file" ] && [ "$file" != "$latest" ] || continue
             [ "$(_lmd_meta_get "$file" path)" = "$expected" ] || continue
             [ "$(_lmd_meta_get "$file" state)" = completed ] || continue
@@ -738,6 +821,7 @@ _lmd_select_fullscan() {
         if [ "$LMD_SCANNER_RESULT" = clean ] && [ "$LMD_HITS_VALID" = 1 ] && [ "$LMD_SCAN_VALID" = 1 ] && [ "${LMD_NATIVE_VALID:-1}" = 1 ] && [ "$completion_ties" = 0 ] && [ "$invalid" = 0 ] && [ "$(_lmd_meta_get "$latest_completed" hits)" = 0 ]; then recovered=1; fi
         # Retain completed findings until strictly later, consistent healthy evidence.
         for file in "$directory"/scan.meta.*; do
+        if hc_budget_expired "$parse_started"; then hc_status ERROR 'LMD selection processing budget exceeded'; return; fi
             [ -f "$file" ] && [ -r "$file" ] && [ "$file" != "$latest_completed" ] && [ "$file" != "$latest" ] || continue
             [ "$(_lmd_meta_get "$file" path)" = "$expected" ] || continue
             [ "$(_lmd_meta_get "$file" state)" = completed ] || continue
@@ -751,6 +835,7 @@ _lmd_select_fullscan() {
         # Keep the immediately preceding completion as scanner context. Only
         # verified recovery demotes its reliability signal; running never does.
         for file in "$directory"/scan.meta.*; do
+        if hc_budget_expired "$parse_started"; then hc_status ERROR 'LMD selection processing budget exceeded'; return; fi
             [ -r "$file" ] && [ "$file" != "$latest_completed" ] || continue
             [ "$(_lmd_meta_get "$file" path)" = "$expected" ] || continue
             [ "$(_lmd_meta_get "$file" state)" = completed ] || continue
@@ -770,6 +855,7 @@ _lmd_select_fullscan() {
     # A new running scan must not erase the last finalized failed/unconfirmed
     # scanner outcome either. Historical context is bounded to its newest report.
     for file in "$directory"/scan.meta.*; do
+        if hc_budget_expired "$parse_started"; then hc_status ERROR 'LMD selection processing budget exceeded'; return; fi
         [ -r "$file" ] && [ "$file" != "$latest" ] || continue
         [ "$(_lmd_meta_get "$file" path)" = "$expected" ] || continue
         state="$(_lmd_meta_get "$file" state)"
@@ -794,8 +880,23 @@ check_lmd() {
     mode="$(hc_mode "${LMD_ENABLED:-${CHECK_LMD:-0}}")"
     [ "$mode" = off ] && return 0
     if [ ! -d "${LMD_DIR:-/usr/local/maldetect}" ]; then
-        [ "$mode" = auto ] || hc_warn 'LMD integration enabled but installation directory is unavailable'
-        return
+        if [ "$mode" = auto ]; then
+            local discovered
+            if ! discovered="$(hc_data_parse directory "${LMD_DIR:-/usr/local/maldetect}" 2>/dev/null)" ||
+               [[ "$discovered" != ABSENT && "$discovered" != PRESENT ]]; then
+                HC_DISCOVERY_FAILED=$((HC_DISCOVERY_FAILED + 1))
+                hc_status ERROR 'LMD discovery failed: installation path unavailable or invalid'
+                return
+            fi
+            if [ "$discovered" = ABSENT ]; then
+                HC_NOT_APPLICABLE=$((HC_NOT_APPLICABLE + 1))
+                hc_detail 'NOT_APPLICABLE: LMD installation directory absent'
+                return
+            fi
+        else
+            hc_warn 'LMD integration enabled but installation directory is unavailable'
+            return
+        fi
     fi
     local LMD_MONITOR_AVAILABLE=1
     if hc_enabled "${LMD_MONITOR_REQUIRED:-1}"; then
