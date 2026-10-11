@@ -185,6 +185,23 @@ pgrep() {{ return 0; }}
     def test_quarantine_mismatch(self):
         self.assertIn('WARNING LMD historical scan quarantine mismatch', self.fullscan('LMD_EXPECT_QUARANTINE_ENABLED=1'))
 
+    def test_quarantine_recovery_requires_completed_scan(self):
+        newer = self.lmd / 'sess/scan.meta.newer'
+        newer.write_text(f'path=/home/?/domains/?/public_html/\nstarted={NOW-60}\n'
+                         'state=running\nquarantine_enabled=1\n')
+        config = 'LMD_EXPECT_QUARANTINE_ENABLED=1'
+        self.assertIn('WARNING LMD historical scan quarantine mismatch', self.fullscan(config))
+        newer.write_text(newer.read_text() + f'state=completed\ncompleted={NOW-1}\n'
+                         'hits=0\ntotal_files=100\nengine=clamav\nsig_version=123\n')
+        self.assertNotIn('quarantine mismatch', self.fullscan(config))
+
+    def test_quarantine_mismatch_with_malware(self):
+        self.append_meta(hits=1)
+        shutil.copyfile(FIXTURES / 'session.malware.tsv', self.session)
+        output = self.fullscan('LMD_EXPECT_QUARANTINE_ENABLED=1')
+        self.assertIn('WARNING LMD historical scan quarantine mismatch', output)
+        self.assertIn('CRITICAL LMD full scan found malware', output)
+
     def test_metadata_is_not_executed(self):
         marker = self.work / 'injected'
         self.append_meta(engine=f'$(touch {marker})', hits='x[0]')
@@ -1205,6 +1222,43 @@ class NativeLmdTests(unittest.TestCase):
         self.save(self.detection())
         self.newer()
         self.assertIn('CRITICAL LMD full scan found malware', self.fullscan())
+
+    def test_old_unconfirmed_findings_after_clean_completion(self):
+        for state in ['unknown', 'failed']:
+            for signature in ['test.eicar.1040', 'php.backdoor.example']:
+                with self.subTest(state=state, signature=signature):
+                    self.save(self.detection(signature))
+                    self.completion(state)
+                    self.newer('completed')
+                    newer = self.lmd / 'sess/scan.meta.260920-0959.999'
+                    with newer.open('a') as file:
+                        file.write(f'completed={NOW-1}\nhits=0\nquarantine_enabled=1\n'
+                                   'total_files=100\nengine=clamav\nsig_version=123\n')
+                    output = self.fullscan()
+                    if 'eicar' in signature:
+                        self.assertIn('historical context', output)
+                        self.assertNotIn('WARNING Full scan contains', output)
+                        self.assertNotIn('CRITICAL', output)
+                    else:
+                        self.assertIn('CRITICAL LMD full scan found malware', output)
+
+    def test_latest_unconfirmed_eicar_still_warns(self):
+        self.save(self.detection('test.eicar.1040'))
+        self.assertIn('WARNING Full scan contains', self.fullscan())
+
+    def test_old_unconfirmed_eicar_with_running_scan_is_context(self):
+        self.save(self.detection('test.eicar.1040'))
+        self.newer()
+        output = self.fullscan()
+        self.assertIn('historical context', output)
+        self.assertNotIn('WARNING Full scan contains', output)
+        self.assertIn('running is not proof of completion', output)
+
+    def test_old_unconfirmed_incomplete_eicar_fails_closed(self):
+        self.save(self.detection('test.eicar.1040'))
+        self.session.write_text(self.session.read_text().replace('/home/example/file.php', 'invalid'))
+        self.newer()
+        self.assertIn('CRITICAL LMD full scan hit details incomplete', self.fullscan())
 
     def test_latest_completion_selected_by_metadata_not_mtime_or_index_order(self):
         oldrow = self.row.copy()

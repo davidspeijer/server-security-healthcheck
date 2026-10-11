@@ -216,7 +216,7 @@ _lmd_test_signature() { [[ "${1,,}" = *eicar* ]]; }
 
 _lmd_check_hits() {
     local file="$1" hits="$2" quarantine="$3" line signature path rest quarantine_path kind
-    local count=0 tests=0 real=0 malformed=0 owner
+    local count=0 tests=0 real=0 malformed=0 owner context="${4:-selected}"
     hc_uint "$hits" || { hc_warn 'LMD full scan hit count unavailable/invalid'; return; }
     if [ "$hits" -eq 0 ]; then hc_status PASS 'LMD full scan: no hits'; return; fi
     [ -r "$file" ] || { hc_status CRITICAL "LMD full scan reports $hits hit(s), but session details are unavailable: $file"; return; }
@@ -250,7 +250,11 @@ _lmd_check_hits() {
             hc_detail 'Quarantine policy is not proof of removal; verify the reported quarantine paths.'
         fi
     elif [ "$tests" -gt 0 ]; then
-        hc_warn "Full scan contains $tests EICAR/test detections (not classified as real malware)"
+        if [ "$context" = unconfirmed ]; then
+            hc_detail "Unconfirmed/failed scan contains $tests EICAR/test detections (historical context, not classified as real malware)"
+        else
+            hc_warn "Full scan contains $tests EICAR/test detections (not classified as real malware)"
+        fi
     fi
     if [ "$count" -ne "$hits" ] || [ "$malformed" -gt 0 ]; then
         hc_status CRITICAL "LMD full scan hit details incomplete: metadata=$hits, parsed=$count, malformed=$malformed; unclassified detections remain"
@@ -488,7 +492,10 @@ _lmd_native_records() {
             "${hdr[16]}" "${hdr[14]}" "${hdr[17]}" "$state" "$session" > "$meta"
         if [ "$state" != completed ] && [ "${hdr[11]}" -gt 0 ]; then
             hc_detail "LMD findings from unconfirmed/failed native scan $id:"
-            _lmd_check_hits "$session" "${hdr[11]}" "${hdr[17]}"
+            # Selection below still warns for test hits in the latest report.
+            # Older unconfirmed tests are context; real/unclassified hits remain
+            # CRITICAL regardless of a later clean completion.
+            _lmd_check_hits "$session" "${hdr[11]}" "${hdr[17]}" unconfirmed
         fi
     done < "$directory/session.index"
 }

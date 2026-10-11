@@ -263,7 +263,14 @@ failed/aborted/killed scans are CRITICAL. A new running/failed scan does not hid
 hits from the most recent completed fullscan; those findings are reported too.
 Unconfirmed native reports with hits are also reported, even if they are not the
 latest report. Missing outcome evidence cannot establish that a later clean scan
-cleared them; old unconfirmed findings can therefore remain visible.
+cleared real malware; old unconfirmed findings can therefore remain visible.
+EICAR-only findings from unselected unconfirmed/failed reports are INFO context.
+The latest selected report and newest completed report still warn for EICAR.
+A later clean completion does not suppress real or unclassified detections from
+unconfirmed native reports. Historical runtime quarantine mismatch remains WARNING
+for the newest completed report, even with zero hits: a scanner error may have
+limited coverage. A running scan with correct policy does not clear it; a newer
+completed scan replaces that report. Live configuration is checked independently.
 An absent historical TSV outside daily retention (`cron_prune_days`, effective
 daily overlays, default 21) is INFO when valid index end metadata places it at
 least N+1 whole days ago and outside the fullscan relevance window, with no
@@ -278,7 +285,8 @@ checked case-insensitively for `eicar`; an EICAR filename alone is not a test
 signature. No other test signatures are currently whitelisted.
 
 - Zero hits: PASS.
-- Only EICAR signatures: WARNING, clearly labelled test detections.
+- Only EICAR signatures: WARNING in selected/latest completed reports; INFO in
+  older unconfirmed/failed reports, clearly labelled test detections.
 - Any non-test signature: CRITICAL; this is a scanner finding, not independently
   confirmed compromise.
 - Missing/unknown/truncated hit data or count mismatch: CRITICAL unclassified

@@ -40,7 +40,10 @@ lifecycle finalization can occur later, after alert dispatch. Missing completion
 evidence gives UNKNOWN/WARNING. An explicit running/failed state remains visible.
 Unconfirmed native reports with hits are checked independently of selection so a
 newer zero-hit report cannot erase unresolved findings. Existing details can retain old
-unconfirmed findings after lifecycle cleanup. Absent TSVs outside the resolved daily
+unconfirmed findings after lifecycle cleanup. EICAR-only findings in unselected
+unconfirmed/failed reports are INFO context; selected/latest completed reports
+still warn. Real and unclassified detections remain CRITICAL independently of
+selection or later clean completion. Absent TSVs outside the resolved daily
 retention and fullscan relevance windows are INFO when the index end metadata is
 valid and no lifecycle file remains; they do not establish completion. The boundary
 is N+1 whole days for GNU find `-mtime +N`, using scan end metadata, never mtime.
