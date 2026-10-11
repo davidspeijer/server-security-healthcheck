@@ -96,7 +96,7 @@ pgrep() {{ return 0; }}
 
     def test_mixed_hits(self):
         self.append_meta(hits=3)
-        self.session.write_text((FIXTURES / 'session.eicar.tsv').read_text() +
+        self.session.write_text((FIXTURES / 'session.eicar.tsv').read_text().replace('\t2\t0\t2.0.1', '\t3\t0\t2.0.1') +
                                 (FIXTURES / 'session.malware.tsv').read_text().split('\n', 1)[1])
         self.assertIn('1 non-test detection(s), 2 EICAR/test', self.fullscan())
 
@@ -111,12 +111,12 @@ pgrep() {{ return 0; }}
 
     def test_malformed_hit_details(self):
         self.append_meta(hits=1)
-        self.session.write_text('#LMD:v1\tscan\nmalformed\n')
+        self.session.write_text((FIXTURES / 'session.malware.tsv').read_text().split('\n')[0] + '\nmalformed\n')
         self.assertIn('malformed=1', self.fullscan())
 
     def test_empty_tsv_column_does_not_shift(self):
         self.append_meta(hits=1)
-        self.session.write_text('#LMD:v1\tscan\nmalware\t/home/file with spaces.php\t\tHEX\tmalware\n')
+        self.session.write_text((FIXTURES / 'session.malware.tsv').read_text().replace('/home/example/domains/example.nl/public_html/eicar filename.php', '/home/file with spaces.php').replace('\t-\tHEX', '\t\tHEX'))
         self.assertIn('Type: HEX', self.fullscan())
 
     def test_unknown_header_fails_closed(self):
@@ -1212,7 +1212,7 @@ class NativeLmdTests(unittest.TestCase):
     def test_malware_and_eicar(self):
         self.save(self.detection())
         self.assertIn('CRITICAL LMD full scan found malware', self.fullscan())
-        self.save(self.detection('test.eicar.1040'))
+        self.save(self.detection('{HEX}test.test.eicar.1040'))
         output = self.fullscan()
         self.assertIn('EICAR/test detections', output)
         self.assertNotIn('CRITICAL', output)
@@ -1233,7 +1233,7 @@ class NativeLmdTests(unittest.TestCase):
 
     def test_old_unconfirmed_findings_after_clean_completion(self):
         for state in ['unknown', 'failed']:
-            for signature in ['test.eicar.1040', 'php.backdoor.example']:
+            for signature in ['{HEX}test.test.eicar.1040', 'php.backdoor.example']:
                 with self.subTest(state=state, signature=signature):
                     self.save(self.detection(signature))
                     self.completion(state)
@@ -1251,11 +1251,11 @@ class NativeLmdTests(unittest.TestCase):
                         self.assertIn('CRITICAL LMD full scan found malware', output)
 
     def test_latest_unconfirmed_eicar_still_warns(self):
-        self.save(self.detection('test.eicar.1040'))
+        self.save(self.detection('{HEX}test.test.eicar.1040'))
         self.assertIn('WARNING Full scan contains', self.fullscan())
 
     def test_old_unconfirmed_eicar_with_running_scan_is_context(self):
-        self.save(self.detection('test.eicar.1040'))
+        self.save(self.detection('{HEX}test.test.eicar.1040'))
         self.newer()
         output = self.fullscan()
         self.assertIn('historical context', output)
@@ -1263,7 +1263,7 @@ class NativeLmdTests(unittest.TestCase):
         self.assertIn('running is not proof of completion', output)
 
     def test_old_unconfirmed_incomplete_eicar_fails_closed(self):
-        self.save(self.detection('test.eicar.1040'))
+        self.save(self.detection('{HEX}test.test.eicar.1040'))
         self.session.write_text(self.session.read_text().replace('/home/example/file.php', 'invalid'))
         self.newer()
         self.assertIn('CRITICAL LMD full scan hit details incomplete', self.fullscan())
@@ -1613,6 +1613,10 @@ class ScannerReliabilityTests(unittest.TestCase):
         self.prepare(2, ['/home/cache/a'])
         self.append_meta(hits=1)
         shutil.copyfile(FIXTURES / 'session.malware.tsv', self.session)
+        fields = self.session.read_text().splitlines()[0].split('\t')
+        fields[6:9] = [self.stamp(NOW-3600) + ' +0200', self.stamp(NOW-1800) + ' +0200', '1800']
+        lines = self.session.read_text().splitlines(); lines[0] = '\t'.join(fields)
+        self.session.write_text('\n'.join(lines) + '\n')
         output = self.fullscan()
         self.assertIn('CRITICAL LMD full scan found malware', output)
         self.assertIn('WARNING LMD full scan completed with 1 scanner access errors', output)
@@ -1621,6 +1625,10 @@ class ScannerReliabilityTests(unittest.TestCase):
         self.prepare(1, ['/home/cache/a'])
         self.append_meta(hits=2)
         shutil.copyfile(FIXTURES / 'session.eicar.tsv', self.session)
+        fields = self.session.read_text().splitlines()[0].split('\t')
+        fields[6:9] = [self.stamp(NOW-3600) + ' +0200', self.stamp(NOW-1800) + ' +0200', '1800']
+        lines = self.session.read_text().splitlines(); lines[0] = '\t'.join(fields)
+        self.session.write_text('\n'.join(lines) + '\n')
         output = self.fullscan()
         self.assertIn('WARNING Full scan contains 2 EICAR/test', output)
         self.assertIn('WARNING LMD full scan completed with 1 scanner access errors', output)
@@ -1670,11 +1678,15 @@ class ScannerReliabilityTests(unittest.TestCase):
         self.assertIn('scanner result: access_errors; exit=2', self.fullscan())
 
     def test_dst_ambiguous_timestamp_is_unknown(self):
-        self.prepare()
+        from datetime import datetime, timezone
+        start = int(datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc).timestamp())
+        end = start + 3 * 3600
         (self.lmd / 'logs/clamscan_log').write_text(
             'Oct 25 2026 02:30:00 host clamscan start\n'
             'Oct 25 2026 02:31:00 host clamscan end return 0\n')
-        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+        output = self.run_shell(f'python3 "$LMD_SCANNER_PARSER" {Q(str(self.lmd / "logs"))} {start} {end}')
+        self.assertEqual(output, 'unknown\t-\t0\t0\t0\n')
+
 
 
 if __name__ == '__main__':

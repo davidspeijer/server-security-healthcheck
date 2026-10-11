@@ -63,8 +63,9 @@ have 14 fields; upstream documents older 9- and 11-field rows:
 18. Runtime `quarantine_hits` at finalization
 19. Host ID
 
-Hit rows have 11 columns in this release; the existing classifier consumes the
-first five (signature, original path, quarantine path, type, type label).
+Hit rows have 11 columns in this release. The classifier validates the complete
+record; the first five are signature, original path, quarantine path, type and
+type label. See [current validation rules](LMD-PARSING.md#module-loading-and-scan-evidence-f01f06).
 `session.last` contains a scan ID, not status or completion evidence, and does
 not select a particular target. File mtimes and this pointer are unsuitable for
 choosing a successful weekly scan.

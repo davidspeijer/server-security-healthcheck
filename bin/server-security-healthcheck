@@ -25,7 +25,10 @@ NOTIFY_DIR="${LIB_DIR}/notify"
 }
 
 # shellcheck source=/dev/null
-source "${LIB_DIR}/common.sh"
+if ! bash -n "${LIB_DIR}/common.sh" || ! source "${LIB_DIR}/common.sh"; then
+    echo "ERROR common module could not be loaded: ${LIB_DIR}/common.sh" >&2
+    exit 2
+fi
 
 [ -r "$MAIN_CONFIG" ] || {
     hc_log "ERROR missing config: $MAIN_CONFIG"
@@ -47,11 +50,76 @@ for module in "${NOTIFY_DIR}"/*.sh; do
     source "$module"
 done
 
-# Load check modules.
+# Known integrations are configured separately from discovered extension modules.
+declare -A HC_REQUIRED HC_LOADED HC_MODULE_LOADED HC_CHECK_MODULE HC_EXECUTED
+for specification in apache:CHECK_APACHE:auto rspamd:CHECK_RSPAMD:auto pureftpd:CHECK_PUREFTP:auto exim:CHECK_EXIM:0 disk:CHECK_DISK:0 clamav:CHECK_CLAMAV:0 lmd:CHECK_LMD:0; do
+    IFS=: read -r check_name config_key default_mode <<< "$specification"
+    value="${!config_key:-$default_mode}"
+    [ "$check_name" != lmd ] || value="${LMD_ENABLED:-$value}"
+    [ "$(hc_mode "$value")" = off ] || HC_REQUIRED[$check_name]=1
+done
+[ "${HC_REQUIRED[lmd]:-0}" = 0 ] || HC_REQUIRED[lmd_policy]=1
 for module in "${CHECK_DIR}"/*.sh; do
-    [ -r "$module" ] || continue
-    # shellcheck source=/dev/null
-    source "$module"
+    [ -e "$module" ] || continue
+    module_name="${module##*/}"; module_name="${module_name%.sh}"
+    # Disabled built-ins are not dependencies. Extensions remain optional discoveries.
+    case "$module_name" in apache|rspamd|pureftpd|exim|disk|clamav|lmd|lmd_policy)
+        [ "${HC_REQUIRED[$module_name]:-0}" = 1 ] || [ "${1:-}" = --list-checks ] || continue ;;
+    esac
+    if [ ! -f "$module" ] || [ ! -r "$module" ]; then
+        hc_status ERROR "Check module unreadable: $module"; continue
+    fi
+    if ! bash -n "$module"; then
+        hc_status ERROR "Check module syntax error: $module"; continue
+    fi
+    # A definition from another module cannot satisfy this built-in contract.
+    case "$module_name" in apache|rspamd|pureftpd|exim|disk|clamav|lmd)
+        unset -f "check_$module_name" ;;
+        lmd_policy) unset -f _lmd_check_configuration ;;
+    esac
+    registration_start=${#HC_REGISTERED_CHECKS[@]}
+    if source "$module"; then
+        case "$module_name" in apache|rspamd|pureftpd|exim|disk|clamav|lmd)
+            if ! declare -F "check_$module_name" >/dev/null; then
+                hc_status ERROR "Check module function missing: check_$module_name; not registered"
+                continue
+            fi ;;
+            lmd_policy)
+                if ! declare -F _lmd_check_configuration >/dev/null; then
+                    hc_status ERROR 'LMD policy module function missing: _lmd_check_configuration'
+                    continue
+                fi ;;
+        esac
+        HC_MODULE_LOADED[$module_name]=1
+        HC_LOADED[$module_name]=1
+        for registered_name in "${HC_REGISTERED_CHECKS[@]:$registration_start}"; do
+            HC_LOADED[$registered_name]=1
+            HC_CHECK_MODULE[$registered_name]="$module_name"
+        done
+    else
+        hc_status ERROR "Check module source failed: $module"
+    fi
+done
+if [ "${HC_REQUIRED[lmd]:-0}" = 1 ] && [ "${HC_LOADED[lmd_policy]:-0}" != 1 ]; then
+    HC_LOADED[lmd]=0
+fi
+for check_name in "${!HC_REQUIRED[@]}"; do
+    if [ "${HC_MODULE_LOADED[$check_name]:-0}" != 1 ]; then
+        hc_status ERROR "Required check module missing or not loaded: $CHECK_DIR/$check_name.sh"
+        continue
+    fi
+    [ "$check_name" != lmd_policy ] || continue
+    if [ "$check_name" = lmd ] && [ "${HC_MODULE_LOADED[lmd_policy]:-0}" != 1 ]; then
+        HC_LOADED[lmd]=0; continue
+    fi
+    registered=0
+    for registered_name in "${HC_REGISTERED_CHECKS[@]}"; do
+        [ "$registered_name" != "$check_name" ] || registered=1
+    done
+    if [ "$registered" = 0 ] || [ "${HC_CHECK_MODULE[$check_name]:-}" != "$check_name" ] || ! declare -F "check_$check_name" >/dev/null; then
+        hc_status ERROR "Required check not registered with function: $check_name"
+        HC_LOADED[$check_name]=0
+    fi
 done
 
 case "${1:-}" in
@@ -65,6 +133,7 @@ case "${1:-}" in
         ;;
     --list-checks)
         printf '%s\n' "${HC_REGISTERED_CHECKS[@]}"
+        [ "$HC_ERRORS" -eq 0 ] || exit 2
         exit 0
         ;;
     --help|-h)
@@ -83,12 +152,22 @@ EOF
 esac
 
 for check_name in "${HC_REGISTERED_CHECKS[@]}"; do
+    [ "${HC_LOADED[$check_name]:-0}" = 1 ] || continue
+    [ "${HC_EXECUTED[$check_name]:-0}" = 0 ] || continue
     function_name="check_${check_name}"
     if declare -F "$function_name" >/dev/null 2>&1; then
-        "$function_name"
+        HC_EXECUTED[$check_name]=1
+        if ! "$function_name"; then
+            hc_status ERROR "Check execution failed: $check_name"
+        fi
     else
         hc_status ERROR "Module '${check_name}' registered but function '${function_name}' is missing"
     fi
+done
+
+for check_name in "${!HC_REQUIRED[@]}"; do
+    [ "$check_name" != lmd_policy ] || continue
+    [ "${HC_EXECUTED[$check_name]:-0}" = 1 ] || hc_status ERROR "Required check not executed: $check_name"
 done
 
 if [ "${#HC_WARNINGS[@]}" -eq 0 ] && [ "$HC_ERRORS" -eq 0 ]; then

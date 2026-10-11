@@ -16,7 +16,8 @@ logs as data. It performs no filesystem checks on detected/inaccessible paths,
 executes no metadata, and writes nothing. Date rotations are ordered by suffix,
 numeric rotations by descending generation, and the current log last; mtime is
 ignored. Mixed/unknown rotation names, duplicate generations, read/decompression
-errors, malformed/nonmonotonic markers and ambiguous DST timestamps yield UNKNOWN.
+errors and relevant malformed/nonmonotonic markers or ambiguous DST timestamps
+yield UNKNOWN. Irrelevant historical corruption is handled as described below.
 No log filename is interpreted as a scan identity.
 
 Only one start/end block wholly within the validated scan start/end epochs is
@@ -53,9 +54,9 @@ excludes a path from scanning. Counts are error records, not proven unique files
 The newest completed scan is checked even while a newer scan runs. A later
 completed scan with exit 0, no diagnostics and zero hits demotes the immediately
 preceding completed scanner result to historical INFO. Running, unconfirmed,
-failed or unknown scanner outcomes cannot prove recovery. Earlier completions
-are not accumulated indefinitely; historical context is bounded to the preceding
-completion, plus the newest unselected failed/unconfirmed report. The latter
+failed or unknown scanner outcomes cannot prove recovery. Scanner-reliability context is bounded to the preceding completion, plus the
+newest unselected failed/unconfirmed report. Completed malware findings from
+other retained reports remain relevant until consistent healthy recovery. The latter
 requires a valid end preceding the healthy scan's start before it can be demoted;
 missing end metadata remains UNKNOWN. Runtime-quarantine policy and malware findings retain their existing
 independent checks, including CRITICAL unresolved unconfirmed malware.
@@ -116,7 +117,8 @@ selector, then removed. No LMD file is modified. Indexed IDs suppress fallback
 to their lifecycle file, including when their native report is invalid or partial.
 Unindexed lifecycle files remain eligible for running/failed status. With no
 index the original lifecycle-only path remains available for compatibility.
-This legacy path cannot independently verify the TSV range/type for clean scans.
+Without a TSV this legacy path cannot independently verify native range/type;
+when a TSV exists its header, record schema and metadata consistency are checked.
 
 Index/TSV finalization is **not** successful completion: upstream's abort handler
 also writes both. A matching lifecycle file must explicitly say `completed` with
@@ -143,8 +145,9 @@ lifecycle metadata for 336 hours is a practical option for the default 192-hour
 freshness threshold; this project never changes that LMD setting itself.
 
 Maximum valid completed epoch wins for completed scans;
-otherwise the started epoch orders the session. Equal epochs break ties by the
-last filename encountered in shell glob order. Matching files with invalid starts
+otherwise the started epoch orders the session. Equal maximum completion epochs
+produce CRITICAL ambiguity; every tied report is assessed and none establishes
+recovery. Matching files with invalid starts
 are excluded with a warning so they cannot silently overwrite trustworthy evidence.
 The previous completed scan is retained for hit reporting when the selected scan
 is running, failed or unknown. Other scan targets are not fullscan candidates.
@@ -173,8 +176,8 @@ window is applied before filtering. Compressed/rotated archives are not read.
 ## Hit sessions
 
 An exact `#LMD:v1` first tab-separated field is required (not a prefix match
-that could also accept a future `v10` format). The first five columns of subsequent records
-are signature, original path, quarantine path, type and type label. This layout was
+that could also accept a future `v10` format). Hit records require 11 columns;
+the first five are signature, original path, quarantine path, type and type label. This layout was
 checked against the upstream 2.0.1 session renderer:
 
 - [LMD session code](https://github.com/rfxn/linux-malware-detect/blob/master/files/internals/lmd_session.sh)
@@ -187,7 +190,7 @@ Tab splitting explicitly preserves empty fields; ordinary Bash `read` with tab
 IFS would collapse them. Owner is obtained read-only from `stat -c %U` if the
 original file still exists, not from undocumented trailing columns.
 
-Only case-insensitive `eicar` in the signature denotes a known test. Path names,
+Only an exact case-sensitive signature in the documented allowlist denotes a known test. Path names,
 quarantine paths and arbitrary descriptions cannot downgrade a non-test finding.
 Hit totals must agree with parsed records. Missing records remain unclassified
 critical findings. A test match is a scanner-signature classification, not a
@@ -281,3 +284,91 @@ against the upstream layouts:
 These references are not runtime dependencies. Location overrides select the files
 being inspected; keep them aligned with the actual installation. Unsupported
 packaging/layouts need a separate recognizer before claiming effective behavior.
+
+## Module loading and scan evidence (F01–F06)
+
+Configured integrations require their shipped module, successful syntax/load
+validation, registration of the expected function by that module, and execution.
+`auto` still requires the module that performs discovery; absence of the service
+can subsequently make the integration inapplicable. Disabled integrations do not
+require their modules. Discovered extension modules are not mandatory when absent.
+The LMD policy helper is a dependency of the LMD integration. Module or execution
+failures produce ERROR and exit 2; other independent loaded checks still run.
+
+Available native TSV evidence is inspected even when lifecycle hits are zero or
+`session.index` is absent. The supported `#LMD:v1` schema has 19 header fields and
+11 hit fields: signature, absolute file path, quarantine path, type, type label,
+hash, size, owner, group, mode, and mtime. Empty quarantine paths remain supported;
+`-` is the upstream sentinel. Short records, unknown types, or conflicting signature/type prefixes are
+unclassified evidence, not valid EICAR hits. Supported native hit types are
+`MD5`, `SHA256`, `HEX`, `YARA`, `CSIG`, `SA`, and `CAV`. Header identity, fullscan range/target, timestamps, engine, file totals,
+signature version and header/lifecycle/index/record counts must agree. Valid malware records remain CRITICAL even when other metadata conflicts.
+Lifecycle-only installations without a TSV retain their existing fallback.
+
+The schema follows upstream LMD 2.0.1 `_session_write_header` and
+`_flush_hit_batch` in
+[`lmd_session.sh`](https://github.com/rfxn/linux-malware-detect/blob/master/files/internals/lmd_session.sh)
+and
+[`lmd_quarantine.sh`](https://github.com/rfxn/linux-malware-detect/blob/master/files/internals/lmd_quarantine.sh).
+Earlier fixtures with five columns were abbreviated examples, not the supported
+native record schema; they have been corrected.
+
+Completed malware findings remain relevant until a strictly later, completed
+scan has a clean scanner result, zero hits, consistent available TSV evidence,
+and valid required metadata. Access errors, exit 2, UNKNOWN, running/pending,
+metadata conflicts, and equal completion timestamps do not establish recovery.
+Equal completion times are explicitly CRITICAL and all tied findings remain
+visible. Retention exceptions and unconfirmed-scan findings retain their existing
+policy; this is not proof that files were removed or quarantined.
+
+EICAR classification uses this exact, case-sensitive allowlist:
+
+- `{HEX}test.test.eicar.1040`
+- `{HEX}test.test.eicar`
+- `{MD5}test.test.eicar.32555`
+- `{MD5}test.test.eicar.32556`
+- `{MD5}test.test.eicar.32557`
+- `{CAV}Eicar-Test-Signature`
+- `{CAV}Win.Test.EICAR_HDB-1`
+
+The five LMD names were verified read-only in the distributed `hex.dat` and
+`md5.dat` signature databases. The ClamAV names are documented in the
+[ClamAV upstream EICAR report](https://github.com/Cisco-Talos/clamav/issues/1062).
+LMD's
+[`_process_clamav_hits`](https://github.com/rfxn/linux-malware-detect/blob/master/files/internals/lmd_clamav.sh)
+adds `{CAV}` to these ClamAV names and strips `.UNOFFICIAL`. Unknown names,
+uppercase variations, suffixes, or arbitrary names containing `eicar` remain
+ordinary detections. EICAR never suppresses scanner failures or other malware.
+
+Scanner correlation uses the requested metadata start/end interval. Relevant
+markers must be ordered, match the host, and identify exactly one invocation.
+Diagnostics can span gzip/plain rotations. Missing boundaries, competing starts,
+duplicate invocations, and gaps in numeric rotations carrying the scan remain
+UNKNOWN. Date-suffixed rotations are ordered by their explicit suffix; their
+rotation frequency is not assumed to be daily.
+
+Malformed timestamp markers are ignored only when their valid calendar portion
+proves them outside the interval (with a two-hour margin for ambiguous local
+clock representations). An older missing end requires independent finalized
+lifecycle metadata proving that invocation ended before the requested scan.
+Otherwise possible overlap remains UNKNOWN. All outstanding historical starts
+require such proof. The original configured session directory is passed to the
+parser even when native records are normalized into scratch metadata. Unreadable
+or corrupt gzip files still fail closed when their contents cannot be excluded.
+
+Executed command lines are parsed as data with Python `shlex`, never executed.
+Recognized executables are `clamscan` and `clamdscan` at `/usr/bin`, `/bin`,
+`/usr/local/bin`, and `/usr/local/cpanel/3rdparty/bin`. Supported upstream wrappers
+are optional `cpulimit -l N --`, followed by optional `nice -n N` and optional
+`ionice -c2 -n N`, in that order. Wrapper options must match this literal grammar. The scanner must receive a
+final `-f` with an absolute file-list path. Supported preceding options are
+`--infected`, `--no-summary`, `--fdpass`, `-r`, absolute-path `-c`/`-d`, and
+numeric `--max-filesize=`/`--max-scansize=`. Unknown extra options and
+`--version`/`--help` invocations cannot establish scan coverage.
+Other wrappers, shell constructs, or a scanner name occurring only as an argument
+produce UNKNOWN. The grammar follows upstream `_build_nice_command` and the
+executed-line writer in
+[`lmd.lib.sh`](https://github.com/rfxn/linux-malware-detect/blob/master/files/internals/lmd.lib.sh)
+and
+[`lmd_scan.sh`](https://github.com/rfxn/linux-malware-detect/blob/master/files/internals/lmd_scan.sh).
+Runtime compatibility remains Python 3.6; the tests use Python 3.12.

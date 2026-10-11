@@ -278,13 +278,16 @@ remaining lifecycle file. Missing recent TSVs still warn and reported hits remai
 CRITICAL. Existing detection details are never hidden by this exception.
 No file mtime is used and a pruned report never counts as successful completion.
 
-For `hits > 0`, versioned `#LMD:v1` TSV sessions are read as data. The first line is
+Available versioned `#LMD:v1` TSV sessions are read as data even when lifecycle hits are zero. The first line is
 metadata; the first hit columns are signature, path, quarantine path, detection
 type and type label. Empty tab fields are preserved. Only the **signature** is
-checked case-insensitively for `eicar`; an EICAR filename alone is not a test
-signature. No other test signatures are currently whitelisted.
+checked against the exact case-sensitive EICAR allowlist in
+[the parsing rules](docs/LMD-PARSING.md#module-loading-and-scan-evidence-f01f06);
+an EICAR filename alone is not a test signature. Native hit records require all
+11 columns. Unknown signature names are ordinary detections.
 
-- Zero hits: PASS.
+- Consistent zero hits with clean scanner evidence: PASS. Unknown or conflicting
+  evidence cannot establish a healthy fullscan.
 - Only EICAR signatures: WARNING in selected/latest completed reports; INFO in
   older unconfirmed/failed reports, clearly labelled test detections.
 - Any non-test signature: CRITICAL; this is a scanner finding, not independently
@@ -527,3 +530,21 @@ findutils and ShellCheck, prepend their GNU binary paths and set `BASH_BIN` to t
 newer Bash. These are portable local tests, not a live Linux/systemd integration
 certification. See [architecture](docs/ARCHITECTURE.md), [modules](docs/MODULES.md)
 and [parser notes](docs/LMD-PARSING.md) for maintenance details.
+
+### Fail-closed scan evidence and recovery
+
+Configured check modules (including `auto` discovery modules) must load,
+register their expected check, and execute; failure is ERROR/exit 2. Disabled
+checks do not require missing modules. Available LMD TSV evidence is validated
+before accepting lifecycle zero-hit claims, including when the native index is
+absent. Malware remains CRITICAL despite contradictory metadata.
+
+Earlier completed malware is superseded only by strictly later, completed,
+consistent zero-hit evidence with a clean scanner result. Access errors, UNKNOWN,
+running/pending scans and equal completion timestamps cannot establish recovery.
+Scanner UNKNOWN remains CRITICAL. EICAR uses an exact case-sensitive allowlist,
+not substring matching. Relevant scanner logs can span rotations; unrelated old
+corruption is excluded only when interval/metadata evidence proves it irrelevant.
+See [LMD parsing rules](docs/LMD-PARSING.md#module-loading-and-scan-evidence-f01f06)
+for the native schema, signatures, supported executable/wrapper grammar and
+compatibility details.
