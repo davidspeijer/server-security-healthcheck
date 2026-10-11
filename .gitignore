@@ -5,4 +5,5 @@ telegram.conf
 tmp/
 .vscode/
 .idea/
-.DS_Store
+.DS_Store__pycache__/
+*.pyc
