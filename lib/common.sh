@@ -172,8 +172,21 @@ hc_enabled() {
     [ "${1:-0}" = "1" ]
 }
 
+# Unit operands are single arguments, never command options. Template names and
+# systemd's escaped names remain supported; whitespace/control bytes are invalid.
+hc_unit_valid() {
+    [[ "$1" =~ ^[a-zA-Z0-9_.:@\\-]+$ ]] && [[ "$1" != -* ]]
+}
+
+hc_systemctl() {
+    local operation="$1" unit="$2"
+    shift 2
+    hc_unit_valid "$unit" || return 2
+    systemctl "$operation" "$@" -- "$unit"
+}
+
 hc_service_active() {
-    systemctl is-active --quiet -- "$1" >/dev/null 2>&1
+    hc_systemctl is-active "$1" --quiet >/dev/null 2>&1
 }
 
 hc_check_service() {
@@ -232,7 +245,7 @@ hc_service_present() {
     for bin in "$@"; do
         hc_have "$bin" && return 0
     done
-    if ! hc_have systemctl || ! output="$(systemctl list-unit-files "$unit.service" --no-legend --no-pager 2>/dev/null)"; then
+    if ! hc_have systemctl || ! output="$(hc_systemctl list-unit-files "$unit.service" --no-legend --no-pager 2>/dev/null)"; then
         HC_DISCOVERY_FAILED=$((HC_DISCOVERY_FAILED + 1))
         hc_status ERROR "Discovery failed: $unit"
         return 2
@@ -252,4 +265,15 @@ hc_service_present() {
         fi
     done <<< "$output"
     return 0
+}
+
+# extdebug adds definition file/line to declare -F. Preserve the caller's option.
+hc_function_from() {
+    local function="$1" expected="$2" declaration name line origin debugging=0
+    shopt -q extdebug && debugging=1
+    shopt -s extdebug
+    declaration="$(declare -F "$function")"
+    [ "$debugging" = 1 ] || shopt -u extdebug
+    read -r name line origin <<< "$declaration"
+    [ "$name" = "$function" ] && [ "$origin" = "$expected" ]
 }

@@ -18,7 +18,25 @@ def limit(name, default):
     return value
 
 
-def lines(path):
+def file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def local_epoch(stamp, fmt='%b %d %Y %H:%M:%S'):
+    """Accept local wall time only when exactly one round-tripping instant exists."""
+    parsed = time.strptime(stamp, fmt)
+    normalized = time.strftime(fmt, parsed)
+    epochs = set()
+    for dst in (0, 1):
+        epoch = int(time.mktime(parsed[:8] + (dst,)))
+        if time.strftime(fmt, time.localtime(epoch)) == normalized:
+            epochs.add(epoch)
+    if len(epochs) != 1:
+        raise ValueError('ambiguous or nonexistent timestamp')
+    return epochs.pop()
+
+
+def lines(path, identity=None):
     maximum = limit('MAX_FILE_BYTES', 64 * 1024 * 1024)
     expanded = limit('MAX_EXPANDED_BYTES', 128 * 1024 * 1024)
     record = limit('MAX_RECORD_BYTES', 64 * 1024)
@@ -30,6 +48,8 @@ def lines(path):
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as source:
         info = os.fstat(source.fileno())
+        if identity is not None and file_identity(info) != identity:
+            raise ValueError('input changed before capture')
         if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
             raise ValueError('input file budget exceeded or not regular')
         stream = gzip.GzipFile(fileobj=source) if str(path).endswith('.gz') else source
@@ -45,6 +65,8 @@ def lines(path):
                 if len(raw) > record or total > expanded or count > records or time.monotonic() > deadline:
                     raise ValueError('input resource budget exceeded')
                 yield raw.decode('utf-8', errors='strict')
+            if identity is not None and file_identity(os.fstat(source.fileno())) != identity:
+                raise ValueError('input changed during capture')
         finally:
             if stream is not source:
                 stream.close()
@@ -71,6 +93,8 @@ def stdin_text():
         total += len(raw)
         if len(raw) > record or total > maximum or len(chunks) >= count_limit:
             raise ValueError('stdin resource budget exceeded')
+        if b'\x00' in raw:
+            raise ValueError('NUL is not representable in shell records')
         chunks.append(raw.decode('utf-8', errors='strict'))
     return ''.join(chunks)
 

@@ -50,12 +50,25 @@ fi
 HC_REGISTERED_CHECKS=()
 HC_DISABLED=0
 
-# Load notification backends.
-for module in "${NOTIFY_DIR}"/*.sh; do
-    [ -r "$module" ] || continue
-    # shellcheck source=/dev/null
-    source "$module"
-done
+# A selected backend is a required runtime dependency, even on healthy runs.
+HC_NOTIFY_READY=0
+if hc_enabled "${NOTIFY_TELEGRAM:-0}" || [ "${1:-}" = --test-notification ]; then
+    module="${NOTIFY_DIR}/telegram.sh"
+    unset -f notify_telegram notify_test
+    if [ ! -f "$module" ] || [ ! -r "$module" ]; then
+        hc_status ERROR "Required notification backend missing or unreadable: $module"
+    elif ! bash -n "$module" 2>/dev/null; then
+        hc_status ERROR "Notification backend syntax error: $module"
+    elif ! source "$module"; then
+        hc_status ERROR "Notification backend source failed: $module"
+        unset -f notify_telegram notify_test
+    elif ! hc_function_from notify_telegram "$module" || ! hc_function_from notify_test "$module"; then
+        hc_status ERROR 'Notification backend function missing or from unexpected module'
+        unset -f notify_telegram notify_test
+    else
+        HC_NOTIFY_READY=1
+    fi
+fi
 
 # Known integrations are configured separately from discovered extension modules.
 declare -A HC_REQUIRED HC_LOADED HC_MODULE_LOADED HC_CHECK_MODULE HC_EXECUTED
@@ -130,9 +143,15 @@ for check_name in "${!HC_REQUIRED[@]}"; do
     fi
 done
 
+if [ "$HC_NOTIFY_READY" = 1 ] &&
+   { ! hc_function_from notify_telegram "${NOTIFY_DIR}/telegram.sh" || ! hc_function_from notify_test "${NOTIFY_DIR}/telegram.sh"; }; then
+    hc_status ERROR 'Notification backend function missing or from unexpected module'
+    HC_NOTIFY_READY=0
+fi
+
 case "${1:-}" in
     --test-notification)
-        if declare -F notify_test >/dev/null 2>&1; then
+        if [ "$HC_NOTIFY_READY" = 1 ] && hc_function_from notify_test "${NOTIFY_DIR}/telegram.sh"; then
             notify_test
             exit $?
         fi
@@ -178,6 +197,13 @@ for check_name in "${!HC_REQUIRED[@]}"; do
     [ "${HC_EXECUTED[$check_name]:-0}" = 1 ] || hc_status ERROR "Required check not executed: $check_name"
 done
 
+# Checks may load extension code; recheck provenance before using the backend.
+if [ "$HC_NOTIFY_READY" = 1 ] &&
+   { ! hc_function_from notify_telegram "${NOTIFY_DIR}/telegram.sh" || ! hc_function_from notify_test "${NOTIFY_DIR}/telegram.sh"; }; then
+    hc_status ERROR 'Notification backend function missing or from unexpected module'
+    HC_NOTIFY_READY=0
+fi
+
 executed_count=0
 for check_name in "${!HC_EXECUTED[@]}"; do executed_count=$((executed_count + 1)); done
 hc_log "Checks: executed=$executed_count disabled=$HC_DISABLED not_applicable=$HC_NOT_APPLICABLE discovery_failed=$HC_DISCOVERY_FAILED"
@@ -214,7 +240,7 @@ if [ "${#HC_DETAILS[@]}" -gt 0 ]; then
     done
 fi
 
-if declare -F notify_telegram >/dev/null 2>&1; then
+if [ "$HC_NOTIFY_READY" = 1 ] && hc_function_from notify_telegram "${NOTIFY_DIR}/telegram.sh"; then
     notify_telegram "$message" || {
         printf '%s\n' "$message" >&2
         exit 2

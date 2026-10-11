@@ -11,27 +11,16 @@ import sys
 import shlex
 import datetime
 import time
+import os
+from collections import namedtuple
 from pathlib import Path
 sys.dont_write_bytecode = True  # Runtime parsing must not write installed libraries.
-from bounded_input import lines, arm_timeout, BudgetExceeded
+from bounded_input import lines, arm_timeout, BudgetExceeded, file_identity, local_epoch
 
 MARKER = re.compile(r'^(...\s+\d{1,2} \d{4} \d{2}:\d{2}:\d{2}) (\S+) clamscan (start|end return ([012]))$')
 EXECUTED = re.compile(r'^(...\s+\d{1,2} \d{4} \d{2}:\d{2}:\d{2}) (\S+) executed: (.+)$')
 ACCESS = re.compile(r"^ERROR: Can't access file (/[^\t\r\n]+)$")
 VOLATILE = re.compile(r'/(?:tmp|cache|upgrade)/|/wp-content/uploads/elementor/css/')
-
-
-def local_epoch(stamp):
-    parsed = time.strptime(stamp, '%b %d %Y %H:%M:%S')
-    normalized = time.strftime('%b %d %Y %H:%M:%S', parsed)
-    epochs = set()
-    for dst in (0, 1):
-        epoch = int(time.mktime(parsed[:8] + (dst,)))
-        if time.strftime('%b %d %Y %H:%M:%S', time.localtime(epoch)) == normalized:
-            epochs.add(epoch)
-    if len(epochs) != 1:
-        raise ValueError('ambiguous timestamp')
-    return epochs.pop()
 
 
 def scanner_command(command):
@@ -98,29 +87,19 @@ def outside_stamp(stamp, started, ended):
     return value < lo - datetime.timedelta(hours=2) or value > hi + datetime.timedelta(hours=2)
 
 
-def historical_finished(directory, scanner_started, current_started, sessions=None):
-    """A missing old log end is harmless only with independent finalized metadata."""
-    proofs = []
-    for path in Path(sessions or str(Path(directory).parent / 'sess')).glob('scan.meta.*'):
-        fields = {}
-        for line in lines(str(path)):
-            key, separator, value = line.rstrip('\n').partition('=')
-            if separator:
-                fields[key] = value
-        start, end = fields.get('started', ''), fields.get('completed', '')
-        if not re.fullmatch(r'[0-9]{1,12}', start) or not re.fullmatch(r'[0-9]{1,12}', end):
-            continue
-        start, end = int(start), int(end)
-        if 0 < start <= scanner_started <= end < current_started:
-            proofs.append(fields.get('state') in ('completed', 'failed', 'aborted', 'killed', 'error', 'cancelled', 'canceled'))
-    return bool(proofs) and all(proofs)
+ScannerSnapshot = namedtuple('ScannerSnapshot', 'files histories')
 
 
-def result(directory, started, ended, sessions=None, snapshot=None):
-    if not 0 < started <= ended:
-        raise ValueError('invalid interval')
+def capture(directory, sessions=None):
+    """Freeze inventory/order/identity/content; reject changes during capture."""
+    from bounded_input import limit
+    def inventory():
+        return {path: file_identity(os.stat(str(path)))
+                for path in Path(directory).glob('clamscan_log*')}
+    before = inventory()
     files = []
-    for path in Path(directory).glob('clamscan_log*'):
+    total = 0
+    for path, identity in before.items():
         suffix = path.name[len('clamscan_log'):]
         if not suffix:
             key = (2, 0)
@@ -130,19 +109,57 @@ def result(directory, started, ended, sessions=None, snapshot=None):
             key = (1, -int(suffix.split('.')[1]))
         else:
             raise ValueError('unsupported rotation')
-        files.append((key, path))
-    if not files or len({key for key, _ in files}) != len(files):
+        content = tuple(lines(str(path), identity))
+        total += sum(len(item.encode('utf-8')) for item in content)
+        if total > limit('MAX_EXPANDED_BYTES', 128 * 1024 * 1024):
+            raise ValueError('aggregate scanner budget exceeded')
+        files.append((key, path, identity, content))
+    if not files or len({item[0] for item in files}) != len(files):
         raise ValueError('missing or duplicate logs')
-    if any(key[0] == 0 for key, _ in files) and any(key[0] == 1 for key, _ in files):
+    if any(item[0][0] == 0 for item in files) and any(item[0][0] == 1 for item in files):
         raise ValueError('mixed rotation')
+    histories = []
+    history_directory = Path(sessions or str(Path(directory).parent / 'sess'))
+    history_before = {path: file_identity(os.stat(str(path))) for path in history_directory.glob('scan.meta.*')}
+    for path, identity in history_before.items():
+        fields = {}
+        for line in lines(str(path), identity):
+            total += len(line.encode('utf-8'))
+            if total > limit('MAX_EXPANDED_BYTES', 128 * 1024 * 1024):
+                raise ValueError('aggregate scanner budget exceeded')
+            key, separator, value = line.rstrip('\n').partition('=')
+            if separator:
+                fields[key] = value
+        start, end = fields.get('started', ''), fields.get('completed', '')
+        if re.fullmatch(r'[0-9]{1,12}', start) and re.fullmatch(r'[0-9]{1,12}', end):
+            histories.append((int(start), int(end), fields.get('state', '')))
+    history_after = {path: file_identity(os.stat(str(path))) for path in history_directory.glob('scan.meta.*')}
+    if history_after != history_before:
+        raise ValueError('historical metadata changed during capture')
+    if inventory() != before:
+        raise ValueError('scanner inventory changed during capture')
+    return ScannerSnapshot(tuple(sorted(files)), tuple(histories))
+
+
+def historical_finished(snapshot, scanner_started, current_started):
+    proofs = [state in ('completed', 'failed', 'aborted', 'killed', 'error', 'cancelled', 'canceled')
+              for start, end, state in snapshot.histories
+              if 0 < start <= scanner_started <= end < current_started]
+    return bool(proofs) and all(proofs)
+
+
+def result(directory, started, ended, sessions=None, snapshot=None):
+    if not 0 < started <= ended:
+        raise ValueError('invalid interval')
+    snapshot = snapshot if snapshot is not None else capture(directory, sessions)
+    files = [(key, path) for key, path, identity, content in snapshot.files]
     active = None
     candidates = []
     previous_epoch = 0
     historical_starts = []
     relevant_files = set()
-    for _, path in sorted(files):
+    for _, path, identity, log in snapshot.files:
         opener = gzip.open if path.name.endswith('.gz') else open
-        log = snapshot[str(path)] if snapshot is not None else lines(str(path))
         for raw in log:
             if '\x00' in raw:
                 raise ValueError('NUL in scanner text')
@@ -173,7 +190,7 @@ def result(directory, started, ended, sessions=None, snapshot=None):
                     raise ValueError('unordered markers')
                 previous_epoch = epoch
                 if kind == 'start':
-                    if active is not None or any(not historical_finished(directory, old, started, sessions) for old in historical_starts):
+                    if active is not None or any(not historical_finished(snapshot, old, started) for old in historical_starts):
                         raise ValueError('overlapping scans')
                     historical_starts = []
                     active = dict(start=epoch, host=host, access=0, volatile=0,
@@ -240,16 +257,8 @@ def result(directory, started, ended, sessions=None, snapshot=None):
     return state, code, access, item['volatile'], other
 
 
-def batch(directory, sessions, metadata):
+def batch(directory, sessions, metadata, semantic_failures=False):
     """One immutable log snapshot per invocation; interval state remains local."""
-    snapshot = {}
-    total = 0
-    from bounded_input import limit
-    for path in Path(directory).glob('clamscan_log*'):
-        snapshot[str(path)] = list(lines(str(path)))
-        total += sum(len(item.encode('utf-8')) for item in snapshot[str(path)])
-        if total > limit('MAX_EXPANDED_BYTES', 128 * 1024 * 1024):
-            raise ValueError('aggregate scanner budget exceeded')
     requests = set()
     for path in Path(metadata).glob('scan.meta.*'):
         fields = {}
@@ -261,10 +270,16 @@ def batch(directory, sessions, metadata):
             requests.add((int(fields['started']), int(fields['completed'])))
         except (KeyError, ValueError):
             continue
+    try:
+        snapshot = capture(directory, sessions)
+    except (OSError, EOFError, ValueError, OverflowError):
+        if not semantic_failures:
+            raise
+        snapshot = None
     output = []
     for started, ended in sorted(requests):
         try:
-            item = result(directory, started, ended, sessions, snapshot)
+            item = result(directory, started, ended, sessions, snapshot) if snapshot is not None else ('unknown', '-', 0, 0, 0)
         except (OSError, EOFError, ValueError, OverflowError):
             item = ('unknown', '-', 0, 0, 0)
         output.append((str(started) + ':' + str(ended),) + item)
@@ -276,7 +291,7 @@ if __name__ == '__main__':
     arm_timeout()
     try:
         if sys.argv[1] == '--batch':
-            for row in batch(*sys.argv[2:5]):
+            for row in batch(*sys.argv[2:5], semantic_failures=True):
                 print('\t'.join(map(str, row)))
         else:
             print('\t'.join(map(str, result(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else None))))

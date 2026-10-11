@@ -9,7 +9,7 @@ import shlex
 import stat
 import sys
 sys.dont_write_bytecode = True  # Runtime parsing must not write installed libraries.
-from bounded_input import text as read_text, stdin_text, arm_timeout, BudgetExceeded
+from bounded_input import text as read_text, stdin_text, arm_timeout, BudgetExceeded, local_epoch
 
 
 class Invalid(ValueError):
@@ -502,7 +502,16 @@ def daily_contract(path, root):
 
 def main():
     mode = sys.argv[1]
-    if mode == 'file-state':
+    if mode == 'event-epoch':
+        value = sys.argv[2]
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.]\d+)?(?:Z|[+-]\d{2}:?\d{2})', value):
+            result = int(timestamp(value.replace(' ', 'T'), int(sys.argv[3])))
+        else:
+            fmt = '%Y-%m-%d %H:%M:%S' if re.match(r'^\d{4}-', value) else '%b %d %Y %H:%M:%S'
+            result = local_epoch(value, fmt)
+            if not 0 < result <= int(sys.argv[3]):
+                raise Invalid('timestamp in the future or before epoch')
+    elif mode == 'file-state':
         result = file_state(sys.argv[2])
     elif mode == 'first-line':
         result = read_text(sys.argv[2]).partition('\n')[0]

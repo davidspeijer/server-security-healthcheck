@@ -391,12 +391,12 @@ _lmd_check_cron_rule() {
 
 _lmd_check_monitor_config() {
     hc_enabled "${LMD_MONITOR_REQUIRED:-1}" || return 0
-    local sysconfig="$1" default="$2" expected="$3" value='' unit
+    local sysconfig="$1" default="$2" expected="$3" value=''
     [ "$expected" = ignore ] && return 0
     [ "${LMD_MONITOR_AVAILABLE:-1}" = 1 ] || return 0
     hc_have systemctl || { hc_warn 'LMD monitor configuration: systemctl unavailable'; return; }
-    unit="$(systemctl cat "${LMD_SERVICE:-maldet.service}" 2>/dev/null)" || { hc_warn 'LMD monitor unit configuration unavailable'; return; }
-    if ! value="$(hc_data_parse monitor "${LMD_DIR:-/usr/local/maldetect}" "$sysconfig" "$default" <<< "$unit" 2>/dev/null)"; then
+    if ! value="$(set -o pipefail; hc_systemctl cat "${LMD_SERVICE:-maldet.service}" 2>/dev/null |
+        hc_data_parse monitor "${LMD_DIR:-/usr/local/maldetect}" "$sysconfig" "$default" 2>/dev/null)"; then
         hc_warn 'LMD monitor unit/environment is unsupported or unreadable (export is not a systemd EnvironmentFile assignment); effective MONITOR_MODE unknown'
         return
     fi
@@ -531,8 +531,20 @@ _lmd_check_configuration() {
     fi
     # A custom daily hook can bypass the checked update guards entirely.
     file="$root/cron/custom.cron"
-    if [ -e "$file" ] && { [ ! -r "$file" ] || grep -Eq '^[[:space:]]*[^#[:space:]]' "$file"; }; then
-        hc_warn 'LMD daily custom.cron contains commands or is unreadable; additional behavior requires review'
+    if [ -e "$file" ] || [ -L "$file" ]; then
+        local hook_contents
+        if ! hook_contents="$(hc_data_parse bounded "$file" 2>/dev/null)"; then
+            hc_status ERROR 'LMD daily custom.cron input UNKNOWN: read/resource limit failure'
+        else
+            local hook_status
+            grep -Eq '^[[:space:]]*[^#[:space:]]' <<< "$hook_contents" 2>/dev/null
+            hook_status=$?
+            case "$hook_status" in
+                0) hc_warn 'LMD daily custom.cron contains commands or is unreadable; additional behavior requires review' ;;
+                1) ;;
+                *) hc_status ERROR 'LMD daily custom.cron classification failed' ;;
+            esac
+        fi
     fi
     if [ -d /usr/share/dtc ] && [ -e /var/lib/dtc/saved_install_config ]; then
         hc_warn 'LMD daily cron can import DTC configuration; additional behavior requires review'

@@ -246,7 +246,7 @@ class DiscoveryTests(Base):
     def test_reason(self): self.assertIn('NOT_APPLICABLE',self.discover().stdout)
     def test_error_collection(self): self.assertIn('errors=1',self.discover(status=1).stdout)
     def test_multiple(self):
-        result=self.shell('hc_have() { [ "$1" = systemctl ]; }; systemctl() { case "$2" in good.service) echo "good.service enabled";; *) return 1;; esac; }; hc_service_present good missing; hc_service_present bad missing; printf "errors=%s" "$HC_ERRORS"')
+        result=self.shell('hc_have() { [ "$1" = systemctl ]; }; systemctl() { case "${@: -1}" in good.service) echo "good.service enabled";; *) return 1;; esac; }; hc_service_present good missing; hc_service_present bad missing; printf "errors=%s" "$HC_ERRORS"')
         self.assertIn('ERROR Discovery failed: bad',result.stdout); self.assertIn('errors=1',result.stdout)
 
 

@@ -2,12 +2,14 @@
 hc_register_check clamav
 
 _clamav_database_directory() {
-    local unit='' config defaults='' directory instance service="${CLAMAV_SERVICE:-clamd@scan}"
+    local config defaults='' directory instance service="${CLAMAV_SERVICE:-clamd@scan}"
     if [ -z "${CLAMAV_CONFIG_FILE:-}" ]; then
-        unit="$(systemctl cat "$service" 2>/dev/null)" || return 1
+        instance="${service#*@}"; instance="${instance%.service}"
+        config="$(set -o pipefail; hc_systemctl cat "$service" 2>/dev/null |
+            hc_data_parse clam-config '' "$instance" 2>/dev/null)" || return 1
+    else
+        config="$(hc_data_parse clam-config "$CLAMAV_CONFIG_FILE" '' </dev/null 2>/dev/null)" || return 1
     fi
-    instance="${service#*@}"; instance="${instance%.service}"
-    config="$(hc_data_parse clam-config "${CLAMAV_CONFIG_FILE:-}" "$instance" <<< "$unit" 2>/dev/null)" || return 1
     if directory="$(hc_data_parse database "$config" '' 2>/dev/null)"; then
         printf '%s\n' "$directory"
         return 0
@@ -61,6 +63,8 @@ _clamav_check_databases() {
 _clamav_last_success_epoch() {
     local now
     now="$(date +%s)" || return 1
+    hc_unit_valid "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" &&
+        hc_unit_valid "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" || return 1
     ( set -o pipefail
       journalctl \
         -u "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" \
@@ -79,6 +83,12 @@ check_clamav() {
         hc_have "$dependency" || { hc_status ERROR "ClamAV dependency missing: $dependency"; return; }
     done
 
+    local unit
+    for unit in "${CLAMAV_SERVICE:-clamd@scan}" "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}" \
+                "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" "${FRESHCLAM_SERVICE:-clamav-freshclam.service}"; do
+        hc_unit_valid "$unit" || { hc_status ERROR 'ClamAV/FreshClam unit name invalid'; return; }
+    done
+
     hc_check_service "${CLAMAV_SERVICE:-clamd@scan}" "ClamAV" || true
 
     local updater_detected=0 last now age_hours
@@ -91,14 +101,14 @@ check_clamav() {
         return
     fi
 
-    if systemctl cat "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}" >/dev/null 2>&1; then
-        if systemctl is-enabled --quiet "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}" 2>/dev/null; then
+    if hc_systemctl cat "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}" >/dev/null 2>&1; then
+        if hc_systemctl is-enabled "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}" --quiet 2>/dev/null; then
             if hc_service_active "${FRESHCLAM_TIMER:-clamav-freshclam-once.timer}"; then
                 updater_detected=1
                 hc_detail "FreshClam timer: enabled and active"
-                if ! systemctl cat "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" >/dev/null 2>&1; then
+                if ! hc_systemctl cat "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" >/dev/null 2>&1; then
                     hc_warn 'FreshClam timer: associated oneshot service missing'
-                elif systemctl is-failed --quiet "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}"; then
+                elif hc_systemctl is-failed "${FRESHCLAM_ONESHOT_SERVICE:-clamav-freshclam-once.service}" --quiet; then
                     hc_warn 'FreshClam timer: associated oneshot service failed'
                 fi
             else
@@ -109,10 +119,10 @@ check_clamav() {
         fi
     fi
 
-    if systemctl cat "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" >/dev/null 2>&1; then
-        if systemctl is-enabled --quiet "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" 2>/dev/null; then
+    if hc_systemctl cat "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" >/dev/null 2>&1; then
+        if hc_systemctl is-enabled "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" --quiet 2>/dev/null; then
             updater_detected=1
-            if systemctl is-active --quiet "${FRESHCLAM_SERVICE:-clamav-freshclam.service}"; then
+            if hc_systemctl is-active "${FRESHCLAM_SERVICE:-clamav-freshclam.service}" --quiet; then
                 hc_detail "FreshClam daemon: active"
             else
                 hc_warn "FreshClam daemon is enabled but not active"

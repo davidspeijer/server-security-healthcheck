@@ -2,6 +2,20 @@
 hc_register_check lmd
 LMD_SCANNER_PARSER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lmd_scanner.py"
 
+_lmd_scanner_output_valid() {
+    local result code access volatile other
+    [[ "$1" =~ ^(clean|detections|access_errors|failure|unknown)$'\t'([012]|-)$'\t'(0|[1-9][0-9]{0,11})$'\t'(0|[1-9][0-9]{0,11})$'\t'(0|[1-9][0-9]{0,11})$ ]] || return 1
+    IFS=$'\t' read -r result code access volatile other <<< "$1"
+    [ "$volatile" -le "$access" ] || return 1
+    case "$result" in
+        clean) [ "$code:$access:$other" = 0:0:0 ] ;;
+        detections) [ "$code:$access:$other" = 1:0:0 ] ;;
+        access_errors) [[ "$code" = 1 || "$code" = 2 ]] && [ "$access" -gt 0 ] && [ "$other" = 0 ] ;;
+        failure) [ "$code" != - ] ;;
+        unknown) [ "$code:$access:$volatile:$other" = -:0:0:0 ] ;;
+    esac
+}
+
 _lmd_scanner_reliability() {
     local file="$1" state="$2" historical="${3:-0}" engine started ended output result code access volatile other
     engine="$(_lmd_meta_get "$file" engine)"
@@ -18,23 +32,65 @@ _lmd_scanner_reliability() {
         hc_detail 'LMD scanner reliability: pending; running is not proof of completion'; return ;;
     esac
     started="$(_lmd_meta_get "$file" started)" ended="$(_lmd_meta_get "$file" completed)"
+    if ! hc_uint "$started" || ! hc_uint "$ended" || [ "$started" = 0 ] || [ "$started" -gt "$ended" ]; then
+        hc_status CRITICAL 'LMD scanner result UNKNOWN: invalid or incomplete scan interval'
+        return
+    fi
     if ! hc_have python3 || [ ! -r "$LMD_SCANNER_PARSER" ]; then
         hc_status ERROR 'LMD scanner reliability parser unavailable (requires Python >=3.6)'; return
     fi
     if declare -p LMD_SCANNER_CACHE >/dev/null 2>&1; then
         if [ "$LMD_SCANNER_CACHE_READY" = 0 ]; then
             LMD_SCANNER_CACHE_READY=1
-            if output="$(python3 "$LMD_SCANNER_PARSER" --batch "${LMD_DIR:-/usr/local/maldetect}/logs" "${LMD_SOURCE_SESSION_DIR:-${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}}" "${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}" 2>/dev/null)"; then
-                local cache_key cache_value
-                while IFS=$'\t' read -r cache_key cache_value; do
-                    [ -z "$cache_key" ] || LMD_SCANNER_CACHE["$cache_key"]="$cache_value"
+            if ! output="$(python3 "$LMD_SCANNER_PARSER" --batch "${LMD_DIR:-/usr/local/maldetect}/logs" "${LMD_SOURCE_SESSION_DIR:-${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}}" "${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}" 2>/dev/null)"; then
+                LMD_SCANNER_CACHE_READY=failed
+                hc_status ERROR 'LMD scanner batch helper execution failed'
+            elif [ -z "$output" ]; then
+                LMD_SCANNER_CACHE_READY=failed
+                hc_status ERROR 'LMD scanner batch helper output empty'
+            else
+                local row cache_key cache_value
+                while IFS= read -r row; do
+                    if [[ ! "$row" =~ ^[0-9]{1,12}:[0-9]{1,12}$'\t' ]] ||
+                       ! _lmd_scanner_output_valid "${row#*$'\t'}"; then
+                        LMD_SCANNER_CACHE_READY=failed; break
+                    fi
+                    cache_key="${row%%$'\t'*}" cache_value="${row#*$'\t'}"
+                    if [ -n "${LMD_SCANNER_CACHE[$cache_key]+present}" ]; then
+                        LMD_SCANNER_CACHE_READY=failed; break
+                    fi
+                    LMD_SCANNER_CACHE["$cache_key"]="$cache_value"
                 done <<< "$output"
+                if [ "$LMD_SCANNER_CACHE_READY" = failed ]; then
+                    hc_status ERROR 'LMD scanner batch helper output malformed'
+                elif declare -p LMD_META_VALUES >/dev/null 2>&1; then
+                    # Validate completeness before any row may establish recovery.
+                    local field meta_file lo hi
+                    for field in "${!LMD_META_VALUES[@]}"; do
+                        [[ "$field" = *'|started' ]] || continue
+                        meta_file="${field%|started}"
+                        lo="${LMD_META_VALUES[$field]}" hi="${LMD_META_VALUES[$meta_file|completed]:-}"
+                        hc_uint "$lo" && hc_uint "$hi" && [ "$lo" -gt 0 ] && [ "$lo" -le "$hi" ] || continue
+                        if [ -z "${LMD_SCANNER_CACHE[$lo:$hi]+present}" ]; then
+                            LMD_SCANNER_CACHE_READY=failed
+                            hc_status ERROR 'LMD scanner batch helper output incomplete'
+                            break
+                        fi
+                    done
+                fi
             fi
         fi
-        output="${LMD_SCANNER_CACHE[$started:$ended]:-unknown$'\t'-$'\t'0$'\t'0$'\t'0}"
+        [ "$LMD_SCANNER_CACHE_READY" != failed ] || return
+        if [ -z "${LMD_SCANNER_CACHE[$started:$ended]+present}" ]; then
+            hc_status ERROR 'LMD scanner batch helper output incomplete'
+            LMD_SCANNER_CACHE_READY=failed
+            return
+        fi
+        output="${LMD_SCANNER_CACHE[$started:$ended]}"
     elif ! output="$(python3 "$LMD_SCANNER_PARSER" "${LMD_DIR:-/usr/local/maldetect}/logs" "$started" "$ended" "${LMD_SOURCE_SESSION_DIR:-${LMD_SESSION_DIR:-${LMD_DIR:-/usr/local/maldetect}/sess}}" 2>/dev/null)"; then
         hc_status ERROR 'LMD scanner reliability parser failed'; return
     fi
+    _lmd_scanner_output_valid "$output" || { hc_status ERROR 'LMD scanner helper output malformed'; return; }
     IFS=$'\t' read -r result code access volatile other <<< "$output"
     if [ "$result" = detections ] && [ "$(_lmd_meta_get "$file" hits)" = 0 ]; then result=failure; fi
     LMD_SCANNER_RESULT="$result"
@@ -80,11 +136,14 @@ _lmd_event_log_path() {
 # are local server time for legacy LMD, or explicit ISO timestamps when supplied.
 _lmd_last_event() {
     local log="$1" tag="$2" pattern="$3" line timestamp contents
-    contents="$(hc_data_parse bounded "$log" 2>/dev/null)" || { printf '%s\n' unknown; return 1; }
-    [ -r "$log" ] || return 1
+    if [[ "${LMD_EVENT_SNAPSHOT_PATH:-}" = "$log" ]]; then
+        contents="$LMD_EVENT_SNAPSHOT"
+    else
+        contents="$(hc_data_parse bounded "$log" 2>/dev/null)" || { printf '%s\n' unknown; return 1; }
+    fi
     line="$(awk -v tag="{$tag}" -v pattern="$pattern" '
         index($0,tag) {body=substr($0,index($0,tag)+length(tag)); if (tolower(body) ~ pattern) last=$0}
-        END {print last}' <<< "$contents")"
+        END {print last}' <<< "$contents")" || { printf '%s\n' unknown; return 1; }
     [ -n "$line" ] || return 1
     if [[ "$line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]; then
         timestamp="${line%% *}"
@@ -93,7 +152,7 @@ _lmd_last_event() {
     else
         timestamp="$(awk '{print $1, $2, $3, $4}' <<< "$line")"
     fi
-    date -d "$timestamp" +%s 2>/dev/null || {
+    hc_data_parse event-epoch "$timestamp" "$(date +%s)" 2>/dev/null || {
         # Distinguish an event with a broken timestamp from no matching event.
         # In particular, an unparseable failure must not become healthy evidence.
         printf '%s\n' unknown
@@ -106,7 +165,11 @@ _lmd_failure_unresolved() {
     [ "$failure" -lt "$success" ] && return 1
     [ "$failure" -gt "$success" ] && return 0
     local contents
-    contents="$(hc_data_parse bounded "$log" 2>/dev/null)" || return 0
+    if [[ "${LMD_EVENT_SNAPSHOT_PATH:-}" = "$log" ]]; then
+        contents="$LMD_EVENT_SNAPSHOT"
+    else
+        contents="$(hc_data_parse bounded "$log" 2>/dev/null)" || return 0
+    fi
     # Logs only record seconds. On ties use append order, so a failure after a
     # same-second success remains visible and a later success really clears it.
     awk -v tag="{$tag}" -v good="$success_pattern" -v bad="$failure_pattern" '
@@ -115,7 +178,11 @@ _lmd_failure_unresolved() {
             if (body ~ good) s=NR
             if (body ~ bad) f=NR
         }
-        END {exit !(f>0 && f>=s)}' "$log"
+        END {exit !(f>0 && f>=s)}' <<< "$contents"
+    local status=$?
+    # A parser failure is never evidence of recovery.
+    [ "$status" = 1 ] && return 1
+    return 0
 }
 
 _lmd_check_service() {
@@ -124,7 +191,7 @@ _lmd_check_service() {
         return
     fi
     local service="${LMD_SERVICE:-maldet.service}" log last age process_status
-    if ! systemctl cat "$service" >/dev/null 2>&1; then
+    if ! hc_systemctl cat "$service" >/dev/null 2>&1; then
         hc_status CRITICAL "LMD realtime service missing: $service"
     elif ! hc_service_active "$service"; then
         hc_status CRITICAL "LMD realtime service is not active: $service"
@@ -138,6 +205,10 @@ _lmd_check_service() {
         esac
     fi
     log="$(_lmd_event_log_path)"
+    local LMD_EVENT_SNAPSHOT_PATH="$log" LMD_EVENT_SNAPSHOT
+    LMD_EVENT_SNAPSHOT="$(hc_data_parse bounded "$log" 2>/dev/null)" || {
+        hc_status ERROR 'LMD event log input UNKNOWN: read/resource limit failure'; return;
+    }
     last="$(_lmd_last_event "$log" mon '^[[:space:]]*(scanned|filtered)[[:space:]]' || true)"
     if ! age="$(hc_age_seconds "$last")"; then
         hc_warn 'LMD realtime monitor: no parseable scan/filter heartbeat (reload alone is insufficient)'
@@ -176,6 +247,10 @@ _lmd_check_signature_updater() {
     local success_pattern='(latest signature set already installed|signature set update completed|signature set updated|signature update completed|^[[:space:]]*update completed)'
     local failure_pattern='(fail(ed|ure)|unable to|could not|aborting|error handling)'
     log="$(_lmd_event_log_path)"
+    local LMD_EVENT_SNAPSHOT_PATH="$log" LMD_EVENT_SNAPSHOT
+    LMD_EVENT_SNAPSHOT="$(hc_data_parse bounded "$log" 2>/dev/null)" || {
+        hc_status ERROR 'LMD event log input UNKNOWN: read/resource limit failure'; return;
+    }
     current="$(_lmd_last_event "$log" sigup 'latest signature set already installed' || true)"
     updated="$(_lmd_last_event "$log" sigup '(signature set update completed|signature set updated|signature update completed)' || true)"
     generic="$(_lmd_last_event "$log" sigup '^[[:space:]]*update completed' || true)"
@@ -219,6 +294,10 @@ _lmd_check_program_updater() {
         disabled) hc_detail 'LMD automatic program update intentionally disabled'; return ;;
     esac
     log="$(_lmd_event_log_path)"
+    local LMD_EVENT_SNAPSHOT_PATH="$log" LMD_EVENT_SNAPSHOT
+    LMD_EVENT_SNAPSHOT="$(hc_data_parse bounded "$log" 2>/dev/null)" || {
+        hc_status ERROR 'LMD event log input UNKNOWN: read/resource limit failure'; return;
+    }
     last="$(_lmd_last_event "$log" update "$success_pattern" || true)"
     hc_age_seconds "$last" >/dev/null || last=0
     failure="$(_lmd_last_event "$log" update "$failure_pattern" || true)"
@@ -228,8 +307,6 @@ _lmd_check_program_updater() {
         [ "$age" -le "$(( ${LMD_UPDATE_FAILURE_LOOKBACK_HOURS:-48} * 3600 ))" ] &&
         _lmd_failure_unresolved "$log" update "$success_pattern" "$failure_pattern" "$failure" "$last"; then
         hc_warn 'LMD automatic program updater: recent failure without later success'
-    elif [ ! -r "$log" ]; then
-        hc_warn 'LMD automatic program updater: event log unavailable'
     else
         hc_detail 'LMD automatic program updater: no unresolved recent failure found'
     fi

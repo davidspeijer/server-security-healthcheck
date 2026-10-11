@@ -584,12 +584,12 @@ notify_telegram "$long"
         library = self.work / 'test library'
         shutil.copytree(ROOT / 'lib', library)
         marker = self.work / 'notification captured'
-        (library / 'notify/telegram.sh').write_text('notify_telegram() { printf "%s\\n" "$1" > ' + Q(str(marker)) + '; }\n')
+        (library / 'notify/telegram.sh').write_text('notify_telegram() { printf "%s\\n" "$1" > ' + Q(str(marker)) + '; }\nnotify_test() { notify_telegram test; }\n')
         self.append_meta(hits=1)
         shutil.copyfile(FIXTURES / 'session.malware.tsv', self.session)
         listing = self.work / 'roots'
         listing.write_text('')
-        result = self.main(f'LMD_ENABLED=1\nLMD_MONITOR_REQUIRED=0\nLMD_DIR="{self.lmd}"\n'
+        result = self.main(f'NOTIFY_TELEGRAM=1\nLMD_ENABLED=1\nLMD_MONITOR_REQUIRED=0\nLMD_DIR="{self.lmd}"\n'
                            f'CHECK_DIRECTADMIN_WEBROOTS=1\nDIRECTADMIN_HOME="{self.work / "absent"}"\nLMD_WEBROOT_LIST="{listing}"\n', lib_dir=library)
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertTrue(marker.exists(), 'A separate check error suppressed the malware notification')
