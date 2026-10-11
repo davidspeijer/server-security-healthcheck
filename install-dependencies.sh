@@ -6,8 +6,8 @@ set -euo pipefail
     exit 1
 }
 
-rpm_packages=(bash coreutils grep sed gawk findutils util-linux curl systemd procps-ng)
-deb_packages=(bash coreutils grep sed gawk findutils util-linux curl systemd procps)
+rpm_packages=(bash coreutils grep sed gawk findutils util-linux curl systemd procps-ng python3)
+deb_packages=(bash coreutils grep sed gawk findutils util-linux curl systemd procps python3)
 
 if command -v dnf >/dev/null 2>&1; then
     dnf install -y "${rpm_packages[@]}"
@@ -18,6 +18,6 @@ elif command -v apt-get >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${deb_packages[@]}"
 else
     echo "Unsupported package manager." >&2
-    echo "Install manually: bash coreutils grep sed awk findutils util-linux curl systemd procps" >&2
+    echo "Install manually: bash coreutils grep sed awk findutils util-linux curl systemd procps python3 (>=3.6 for LMD scanner reliability)" >&2
     exit 1
 fi

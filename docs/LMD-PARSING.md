@@ -3,7 +3,93 @@
 The healthcheck reads LMD data; it never sources LMD shell/configuration files and
 never invokes maldet (even report commands can run initialization routines).
 
-## Metadata
+## Scanner reliability (2026-10-11)
+
+Before this change the healthcheck never read `clamscan_log`, scanner exit codes,
+or scanner stderr. It reported lifecycle completion and zero hits independently
+of scanner reliability. Runtime quarantine mismatch was only an indirect clue to
+an error; there was no scanner-log rotation handling. Completion and zero hits
+remain separate facts, now accompanied by an explicit scanner result.
+
+`lmd_scanner.py` uses Python >=3.6 stdlib to read current and rotated plain/gzip
+logs as data. It performs no filesystem checks on detected/inaccessible paths,
+executes no metadata, and writes nothing. Date rotations are ordered by suffix,
+numeric rotations by descending generation, and the current log last; mtime is
+ignored. Mixed/unknown rotation names, duplicate generations, read/decompression
+errors, malformed/nonmonotonic markers and ambiguous DST timestamps yield UNKNOWN.
+No log filename is interpreted as a scan identity.
+
+Only one start/end block wholly within the validated scan start/end epochs is
+accepted, with one recorded invocation and matching hostname. Native TSV bounds
+take precedence over lifecycle startup timestamps. A block can cross rotations.
+Errors before/after it belong to other scans; overlapping/incomplete blocks or
+multiple candidate invocations cannot prove a result. Untimestamped stderr is
+attributed only inside that unique block. The format has no scan ID and cannot
+resolve concurrent scanner invocations reliably: ambiguous evidence fails closed.
+
+| Result | Severity | Meaning |
+|---|---|---|
+| Running | INFO | Pending; no recovery evidence |
+| Exit 0, no diagnostics | INFO | Scanner invocation completed without logged errors; hits are checked separately |
+| Exit 1, findings present, no diagnostics | INFO for reliability | Detection outcome, not a clean scan; malware/EICAR classification is unchanged |
+| Exit 1 or 2 with only exact access-error records | WARNING | Counted access failures; coverage may be incomplete |
+| Exit 2 without access-only evidence, other diagnostics, or conflicting exit/hit data | CRITICAL | Scanner failure or unreliable coverage |
+| Missing/malformed/ambiguous logs | CRITICAL / UNKNOWN | Healthy coverage cannot be established |
+| Missing Python/helper or failed parser process | ERROR | Healthcheck could not perform the check |
+| Older scanner result after verified recovery | INFO | Historical context, not a current scanner problem |
+
+There is no arbitrary numeric threshold. All access-error counts, including
+thousands, are shown in the warning; they are never described as benign or
+limited. An access-only log does not quantify what fraction was scanned and
+cannot prove a daemon-wide failure. Other diagnostics and uncertainty escalate
+to CRITICAL regardless of count. A future count/fraction escalation would need
+an explicitly chosen, configurable coverage policy and reliable denominator.
+
+The path context recognizes `/tmp/`, `/cache/`, `/upgrade/` and Elementor's
+generated CSS directory. It reports *likely* volatile paths only. Neither this
+label nor present-day existence proves a race condition, affects severity, or
+excludes a path from scanning. Counts are error records, not proven unique files.
+
+The newest completed scan is checked even while a newer scan runs. A later
+completed scan with exit 0, no diagnostics and zero hits demotes the immediately
+preceding completed scanner result to historical INFO. Running, unconfirmed,
+failed or unknown scanner outcomes cannot prove recovery. Earlier completions
+are not accumulated indefinitely; historical context is bounded to the preceding
+completion, plus the newest unselected failed/unconfirmed report. The latter
+requires a valid end preceding the healthy scan's start before it can be demoted;
+missing end metadata remains UNKNOWN. Runtime-quarantine policy and malware findings retain their existing
+independent checks, including CRITICAL unresolved unconfirmed malware.
+
+Read-only production validation found:
+
+- `261004-0030.1135486`: exit 2, exactly three access-error records, all tmp/cache;
+  the start/errors are in `clamscan_log-20261004.gz` and the end in
+  `clamscan_log-20261011`. Thirty-five earlier errors in the same archive are
+  outside this block. This scan had incomplete coverage, despite zero hits.
+- `261011-0030.1266935`: exit 0, no access errors or other diagnostics; completed
+  2026-10-11 08:24:29 CEST with zero hits and runtime quarantine enabled.
+
+Upstream semantics were checked against installed ClamAV 1.4.6:
+[client.c](https://github.com/Cisco-Talos/clamav/blob/clamav-1.4.6/clamdscan/client.c)
+returns 1 for infections, otherwise 2 for errors, otherwise 0;
+[proto.c](https://github.com/Cisco-Talos/clamav/blob/clamav-1.4.6/clamdscan/proto.c)
+increments the error count on `error_stat` / `Can't access file`. A detection exit
+can therefore coexist with errors. Neither exit 2 nor the access message proves
+why a file was inaccessible.
+
+The installed LMD `_clamd_retry_scan` saves the scanner return code; its
+`_scan_run_clamav` disables runtime quarantine for return 2 when
+`quarantine_on_error=0` and records the return code in the scanner log. It also
+disables quarantine on `no reply from clamd`. LMD can still record completion
+after errors. Its 19-field TSV and lifecycle metadata have no dedicated scanner
+error/exit field. See also upstream
+[lmd_scan.sh](https://github.com/rfxn/linux-malware-detect/blob/master/files/internals/lmd_scan.sh).
+
+The parser cannot reconstruct missing stderr or detect silently edited logs.
+This is evidence from retained LMD logs, not an independent coverage attestation.
+No production configuration, log, session or webroot was changed.
+
+## Session metadata
 
 `_lmd_meta_get(file, key)` retains the last exact `key=` value via awk. Values may
 contain `=`; only the first separator is structural. CRLF is accepted. Duplicate

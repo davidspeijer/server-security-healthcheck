@@ -337,7 +337,8 @@ policy; their metadata describes the scan-time policy, not today's live settings
 
 `LMD_CONFIG_CHECK_ENABLED=1` (also the code default) enables read-only checks when
 the LMD integration runs. Set it to `0` to skip this policy profile while retaining
-all operational checks. No extra runtime dependency is introduced. Existing
+all operational checks. The policy resolver remains Bash-only; scanner reliability
+uses the Python helper described below. Existing
 configuration is preserved on upgrade; missing new settings use the defaults
 below. Adapt the expectations for another server layout or update policy.
 
@@ -507,16 +508,21 @@ count; per-hit paths/signatures appear immediately before the finding.
 
 ## Tests and module development
 
+Tests require Python >=3.7 (`subprocess.run(text=True, capture_output=True)`).
+On this server use Python 3.12; the system Python 3.6 remains unchanged.
+
 ```bash
-python3 tests/test_healthcheck.py
+python3.12 -m unittest discover -s tests -v
 shellcheck -S style bin/server-security-healthcheck lib/common.sh lib/checks/*.sh \
   lib/notify/*.sh install.sh uninstall.sh install-dependencies.sh
 ```
 
 The fixture suite uses a fixed clock and mocked service/process/network commands;
 it does not run a scan or contact Telegram. Installation tests use a temporary
-filesystem prefix with administrative commands replaced by test stubs. Python is
-only a test dependency, not a runtime dependency. On macOS, install Bash, coreutils,
+filesystem prefix with administrative commands replaced by test stubs. Python
+>=3.6 is also required for the LMD scanner-log reliability parser (stdlib only;
+gzip support, no packages to install with pip). Other checks remain Bash-based.
+The parser works with the server's system Python 3.6. On macOS, install Bash, coreutils,
 findutils and ShellCheck, prepend their GNU binary paths and set `BASH_BIN` to the
 newer Bash. These are portable local tests, not a live Linux/systemd integration
 certification. See [architecture](docs/ARCHITECTURE.md), [modules](docs/MODULES.md)

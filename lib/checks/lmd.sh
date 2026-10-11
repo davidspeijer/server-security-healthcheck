@@ -1,5 +1,45 @@
 #!/usr/bin/env bash
 hc_register_check lmd
+LMD_SCANNER_PARSER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lmd_scanner.py"
+
+_lmd_scanner_reliability() {
+    local file="$1" state="$2" historical="${3:-0}" engine started ended output result code access volatile other
+    engine="$(_lmd_meta_get "$file" engine)"
+    LMD_SCANNER_RESULT=unknown
+    case "$engine" in
+        native) hc_detail 'LMD scanner reliability: native engine; ClamAV log not applicable'; return ;;
+        clamav|clamdscan|clamscan) ;;
+        *)
+            if [ "$historical" = 1 ]; then hc_detail 'LMD historical scanner reliability UNKNOWN: unsupported engine; superseded';
+            else hc_status CRITICAL 'LMD scanner reliability UNKNOWN: unsupported engine'; fi
+            return ;;
+    esac
+    case "$state" in running|started|paused)
+        hc_detail 'LMD scanner reliability: pending; running is not proof of completion'; return ;;
+    esac
+    started="$(_lmd_meta_get "$file" started)" ended="$(_lmd_meta_get "$file" completed)"
+    if ! hc_have python3 || [ ! -r "$LMD_SCANNER_PARSER" ]; then
+        hc_status ERROR 'LMD scanner reliability parser unavailable (requires Python >=3.6)'; return
+    fi
+    if ! output="$(python3 "$LMD_SCANNER_PARSER" "${LMD_DIR:-/usr/local/maldetect}/logs" "$started" "$ended" 2>/dev/null)"; then
+        hc_status ERROR 'LMD scanner reliability parser failed'; return
+    fi
+    IFS=$'\t' read -r result code access volatile other <<< "$output"
+    if [ "$result" = detections ] && [ "$(_lmd_meta_get "$file" hits)" = 0 ]; then result=failure; fi
+    LMD_SCANNER_RESULT="$result"
+    hc_detail "LMD scanner result: $result; exit=$code; scan=${file##*/scan.meta.}"
+    hc_detail "LMD scanner access error records: $access; likely volatile paths: $volatile (path context only); other diagnostics: $other"
+    if [ "$historical" = 1 ]; then
+        hc_detail 'LMD historical scanner result superseded by a newer completed scan with verified healthy scanner result'
+        return
+    fi
+    case "$result" in
+        clean|detections) hc_detail 'LMD scanner invocation completed without logged errors; this does not prove malware absence' ;;
+        access_errors) hc_warn "LMD full scan completed with $access scanner access errors; coverage may be incomplete" ;;
+        failure) hc_status CRITICAL 'LMD scanner failure or conflicting result; reliable scan coverage not established' ;;
+        *) hc_status CRITICAL 'LMD scanner result UNKNOWN: missing, malformed or ambiguous log evidence; reliable scan coverage not established' ;;
+    esac
+}
 
 # Never source metadata: it is append-only key=value data, not shell code.
 # Exact key matching and last assignment wins (notably running -> completed).
@@ -273,6 +313,7 @@ _lmd_scan_details() {
     hc_detail "LMD full scan ID: ${file##*/scan.meta.}; state: $state"
     hc_detail "LMD full scan started epoch: ${started:-unknown}; ended epoch: ${completed:-unknown}"
     hc_detail "LMD full scan hits: ${hits:-unknown}"
+    _lmd_scanner_reliability "$file" "$state"
     for value in total_files engine sig_version; do
         local field
         field="$(_lmd_meta_get "$file" "$value")"
@@ -531,6 +572,8 @@ _lmd_select_fullscan() {
     local expected="${LMD_EXPECTED_FULLSCAN_PATH:-/home/?/domains/?/public_html/}"
     local file path started completed order state latest='' latest_order=0 latest_completed='' completed_order=0
     local invalid=0 mismatched=0 now age runtime max_age
+    local LMD_SCANNER_RESULT=unknown previous_completed='' previous_order=0 recovered=0
+    local unresolved='' unresolved_order=0 unresolved_end historical
     now="$(date +%s)"
     max_age="${LMD_FULLSCAN_MAX_AGE_HOURS:-$(( ${FULLSCAN_MAX_AGE_DAYS:-8} * 24 ))}"
     [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || { hc_warn "LMD full scan session directory unavailable: $directory"; return; }
@@ -589,6 +632,45 @@ _lmd_select_fullscan() {
     if [ -n "$latest_completed" ] && [ "$latest_completed" != "$latest" ]; then
         hc_detail 'LMD previous completed scan findings:'
         _lmd_scan_details "$latest_completed" completed
+    fi
+    if [ -n "$latest_completed" ]; then
+        if [ "$LMD_SCANNER_RESULT" = clean ] && [ "$(_lmd_meta_get "$latest_completed" hits)" = 0 ]; then recovered=1; fi
+        # Keep the immediately preceding completion as scanner context. Only
+        # verified recovery demotes its reliability signal; running never does.
+        for file in "$directory"/scan.meta.*; do
+            [ -r "$file" ] && [ "$file" != "$latest_completed" ] || continue
+            [ "$(_lmd_meta_get "$file" path)" = "$expected" ] || continue
+            [ "$(_lmd_meta_get "$file" state)" = completed ] || continue
+            started="$(_lmd_meta_get "$file" started)" completed="$(_lmd_meta_get "$file" completed)"
+            hc_uint "$started" && hc_uint "$completed" || continue
+            if [ "$started" -gt 0 ] && [ "$completed" -ge "$started" ] &&
+                [ "$completed" -lt "$completed_order" ] && [ "$completed" -gt "$previous_order" ]; then
+                previous_completed="$file"; previous_order="$completed"
+            fi
+        done
+        if [ -n "$previous_completed" ]; then
+            _lmd_scanner_reliability "$previous_completed" completed "$recovered"
+        fi
+    fi
+    # A new running scan must not erase the last finalized failed/unconfirmed
+    # scanner outcome either. Historical context is bounded to its newest report.
+    for file in "$directory"/scan.meta.*; do
+        [ -r "$file" ] && [ "$file" != "$latest" ] || continue
+        [ "$(_lmd_meta_get "$file" path)" = "$expected" ] || continue
+        state="$(_lmd_meta_get "$file" state)"
+        case "$state" in completed|running|started|paused) continue ;; esac
+        started="$(_lmd_meta_get "$file" started)" completed="$(_lmd_meta_get "$file" completed)"
+        hc_uint "$started" || continue
+        if [ "$started" -gt 0 ] && [ "$started" -le "$now" ] && [ "$started" -gt "$unresolved_order" ]; then
+            unresolved="$file"; unresolved_order="$started"; unresolved_end="$completed"
+        fi
+    done
+    if [ -n "$unresolved" ]; then
+        historical=0
+        if [ "$recovered" = 1 ] && hc_uint "$unresolved_end" &&
+            [ "$unresolved_end" -ge "$unresolved_order" ] &&
+            [ "$(_lmd_meta_get "$latest_completed" started)" -ge "$unresolved_end" ]; then historical=1; fi
+        _lmd_scanner_reliability "$unresolved" "$(_lmd_meta_get "$unresolved" state)" "$historical"
     fi
 }
 

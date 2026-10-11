@@ -37,7 +37,7 @@ class HealthcheckTests(unittest.TestCase):
         self.session = self.lmd / 'sess/session.tsv.260920-0030.1260922'
         self.env = dict(os.environ, TZ='Europe/Amsterdam', LC_ALL='C')
 
-    def run_shell(self, script, expected=0):
+    def run_shell(self, script, expected=0, reliability=False):
         prefix = f'''set -u -o pipefail
 source {Q(str(ROOT / 'lib/common.sh'))}
 HC_REGISTERED_CHECKS=()
@@ -50,6 +50,10 @@ date() {{ if [ "$*" = +%s ]; then printf '%s\\n' {NOW}; else command date "$@"; 
 systemctl() {{ return 0; }}
 pgrep() {{ return 0; }}
 '''
+        # Existing fixtures isolate lifecycle/hit/config checks and do not carry
+        # scanner logs. ScannerReliabilityTests exercise the real integration.
+        if not reliability:
+            prefix += '_lmd_scanner_reliability() { LMD_SCANNER_RESULT=clean; }\n'
         result = subprocess.run([BASH, '-c', prefix + script], env=self.env,
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
@@ -522,10 +526,14 @@ notify_telegram "$long"
         telegram.write_text('TELEGRAM_BOT_TOKEN="existing test value"\n')
         example = destination / 'etc/server-security-healthcheck/healthcheck.conf.example'
         example.write_text('old example')
+        parser = destination / 'usr/local/lib/server-security-healthcheck/checks/lmd_scanner.py'
+        self.assertEqual(parser.read_text(), (ROOT / 'lib/checks/lmd_scanner.py').read_text())
+        parser.write_text('old parser')
         self.admin_script('install.sh')
         self.assertEqual(config.read_text(), 'CHECK_LMD=1\nFULLSCAN_MAX_AGE_DAYS=9\n')
         self.assertEqual(telegram.read_text(), 'TELEGRAM_BOT_TOKEN="existing test value"\n')
         self.assertEqual(example.read_text(), (ROOT / 'config/healthcheck.conf.example').read_text())
+        self.assertEqual(parser.read_text(), (ROOT / 'lib/checks/lmd_scanner.py').read_text())
         unit = destination / 'etc/systemd/system/server-security-healthcheck.service'
         self.assertIn('SuccessExitStatus=1\n', unit.read_text())
         self.admin_script('uninstall.sh')
@@ -1424,6 +1432,249 @@ class NativeLmdTests(unittest.TestCase):
         with self.index.open('a') as file:
             file.write('\t'.join(oldrow) + '\n')
         self.assertIn('CRITICAL LMD full scan found malware', self.fullscan())
+
+
+class ScannerReliabilityTests(unittest.TestCase):
+    setUp = HealthcheckTests.setUp
+    append_meta = HealthcheckTests.append_meta
+
+    def run_shell(self, script, expected=0):
+        return HealthcheckTests.run_shell(self, script, expected, reliability=True)
+
+    def fullscan(self):
+        return self.run_shell('LMD_EXPECT_QUARANTINE_ENABLED=1\n_lmd_check_fullscan')
+
+    def stamp(self, epoch):
+        from datetime import datetime, timedelta, timezone
+        return datetime.fromtimestamp(epoch, timezone(timedelta(hours=2))).strftime('%b %d %Y %H:%M:%S')
+
+    def block(self, start=NOW-3600, end=NOW-1800, code=0, paths=(), other=''):
+        return (f'{self.stamp(start)} host clamscan start\n'
+                f'{self.stamp(start)} host executed: /usr/bin/clamdscan -f /literal/filelist\n' +
+                ''.join(f"ERROR: Can't access file {path}\n" for path in paths) + other +
+                f'{self.stamp(end)} host clamscan end return {code}\n')
+
+    def prepare(self, code=0, paths=(), other=''):
+        self.append_meta(started=NOW-3600, completed=NOW-1800, elapsed=1800, quarantine_enabled=1)
+        (self.lmd / 'logs/clamscan_log').write_text(self.block(code=code, paths=paths, other=other))
+
+    def newer(self, state='completed', code=0):
+        path = self.lmd / 'sess/scan.meta.newer'
+        path.write_text(f'path=/home/?/domains/?/public_html/\nstarted={NOW-60}\nstate={state}\n'
+                        'engine=clamdscan\ntotal_files=100\nsig_version=123\nquarantine_enabled=1\n')
+        if state == 'completed':
+            with path.open('a') as file:
+                file.write(f'completed={NOW-1}\nhits=0\nelapsed=59\n')
+            with (self.lmd / 'logs/clamscan_log').open('a') as file:
+                file.write(self.block(NOW-60, NOW-1, code))
+
+    def test_completed_clean_exit_zero(self):
+        self.prepare()
+        output = self.fullscan()
+        self.assertIn('scanner result: clean; exit=0', output)
+        self.assertNotIn('CRITICAL', output)
+        self.assertNotIn('WARNING', output)
+
+    def test_three_access_errors_zero_hits(self):
+        self.prepare(2, ['/home/site/tmp/file', '/home/site/cache/a', '/home/site/cache/b'])
+        output = self.fullscan()
+        self.assertIn('WARNING LMD full scan completed with 3 scanner access errors', output)
+        self.assertIn('likely volatile paths: 3 (path context only)', output)
+        self.assertIn('full scan hits: 0', output)
+        self.assertNotIn('CRITICAL', output)
+
+    def test_many_access_errors_remain_visible(self):
+        self.prepare(2, ['/home/site/cache/file{}'.format(i) for i in range(9063)])
+        self.assertIn('WARNING LMD full scan completed with 9063 scanner access errors', self.fullscan())
+
+    def test_persistent_looking_path_not_ignored(self):
+        self.prepare(2, ['/home/site/index.php'])
+        output = self.fullscan()
+        self.assertIn('likely volatile paths: 0', output)
+        self.assertIn('WARNING LMD full scan completed with 1 scanner access errors', output)
+
+    def test_unknown_scanner_error_is_critical(self):
+        for error in ['ERROR: Could not connect to clamd\n', 'timeout\n', 'database failure\n', '']:
+            with self.subTest(error=error):
+                self.prepare(2, other=error)
+                self.assertIn('CRITICAL LMD scanner failure', self.fullscan())
+
+    def test_mixed_access_and_other_errors_is_critical(self):
+        self.prepare(2, ['/home/site/cache/a'], 'ERROR: daemon unavailable\n')
+        self.assertIn('CRITICAL LMD scanner failure', self.fullscan())
+
+    def test_exit_zero_with_access_errors_conflicts(self):
+        self.prepare(0, ['/home/site/cache/a'])
+        self.assertIn('CRITICAL LMD scanner failure', self.fullscan())
+
+    def test_rotation_split_and_previous_scan_errors(self):
+        import gzip
+        self.prepare()
+        block = self.block(code=2, paths=['/home/tmp/a', '/home/cache/b', '/home/cache/c'])
+        first, last = block.rsplit('\n', 2)[0] + '\n', block.rsplit('\n', 2)[1] + '\n'
+        old = self.block(NOW-7200, NOW-7000, 2, ['/home/old/error'] * 35)
+        with gzip.open(self.lmd / 'logs/clamscan_log-20260920.gz', 'wt') as file:
+            file.write(old + first)
+        (self.lmd / 'logs/clamscan_log-20260927').write_text(last)
+        (self.lmd / 'logs/clamscan_log').write_text(self.block(NOW-1200, NOW-600))
+        output = self.fullscan()
+        self.assertIn('scanner access error records: 3;', output)
+        self.assertNotIn('UNKNOWN', output)
+
+    def test_missing_log_is_unknown_critical(self):
+        self.append_meta(started=NOW-3600, completed=NOW-1800)
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+
+    def test_malformed_timestamp_is_unknown(self):
+        self.prepare()
+        log = self.lmd / 'logs/clamscan_log'
+        log.write_text(log.read_text().replace('Sep 20 2026', 'Sep 99 2026'))
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+
+    def test_malformed_invocation_timestamp_is_unknown(self):
+        self.prepare()
+        log = self.lmd / 'logs/clamscan_log'
+        lines = log.read_text().splitlines(keepends=True)
+        lines[1] = lines[1].replace('Sep 20 2026', 'Sep 99 2026')
+        log.write_text(''.join(lines))
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+
+    def test_recorded_command_is_not_a_scanner(self):
+        self.prepare()
+        log = self.lmd / 'logs/clamscan_log'
+        log.write_text(log.read_text().replace('/usr/bin/clamdscan', '/usr/bin/true'))
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+
+    def test_missing_end_and_overlapping_invocations_are_unknown(self):
+        self.prepare()
+        log = self.lmd / 'logs/clamscan_log'
+        log.write_text(self.block().split('host clamscan end')[0])
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+        log.write_text(self.block().replace('host executed:', 'host clamscan start\nignored executed:'))
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+
+    def test_new_clean_completion_recovers_old_access_warning(self):
+        self.prepare(2, ['/home/cache/a'])
+        self.newer()
+        output = self.fullscan()
+        self.assertNotIn('WARNING', output)
+        self.assertNotIn('CRITICAL', output)
+        self.assertIn('historical scanner result superseded', output)
+        self.assertIn('scanner access error records: 1', output)
+
+    def test_running_scan_does_not_recover_old_warning(self):
+        self.prepare(2, ['/home/cache/a'])
+        self.newer('running')
+        self.assertIn('WARNING LMD full scan completed with 1 scanner access errors', self.fullscan())
+
+    def test_running_scan_does_not_recover_failed_scanner(self):
+        self.prepare(2, other='ERROR: daemon unavailable\n')
+        self.newer('running')
+        self.assertIn('CRITICAL LMD scanner failure', self.fullscan())
+
+    def test_running_does_not_hide_explicit_failed_scan(self):
+        self.prepare(2, other='ERROR: daemon unavailable\n')
+        self.append_meta(state='failed')
+        self.newer('running')
+        self.assertIn('CRITICAL LMD scanner failure', self.fullscan())
+
+    def test_clean_completion_demotes_explicit_failed_scan(self):
+        self.prepare(2, other='ERROR: daemon unavailable\n')
+        self.append_meta(state='failed')
+        self.newer()
+        output = self.fullscan()
+        self.assertNotIn('CRITICAL', output)
+        self.assertIn('historical scanner result superseded', output)
+
+    def test_failed_scan_missing_end_is_not_hidden_by_running(self):
+        self.prepare(2, other='ERROR: daemon unavailable\n')
+        self.append_meta(state='failed', completed='')
+        self.newer('running')
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+
+    def test_unverified_completion_does_not_demote_previous_error(self):
+        self.prepare(2, ['/home/cache/a'])
+        self.newer(code=2)
+        output = self.fullscan()
+        self.assertIn('CRITICAL LMD scanner failure', output)
+        self.assertIn('WARNING LMD full scan completed with 1 scanner access errors', output)
+
+    def test_log_and_metadata_are_not_executed(self):
+        marker = self.work / 'injected'
+        self.prepare(2, [f'/home/cache/$(touch {marker})'])
+        self.append_meta(scanner_error=f'$(touch {marker})')
+        self.assertIn('scanner access error records: 1', self.fullscan())
+        self.assertFalse(marker.exists())
+        self.append_meta(completed=f'$(touch {marker})')
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+        self.assertFalse(marker.exists())
+
+    def test_real_malware_with_access_errors_stays_critical(self):
+        self.prepare(2, ['/home/cache/a'])
+        self.append_meta(hits=1)
+        shutil.copyfile(FIXTURES / 'session.malware.tsv', self.session)
+        output = self.fullscan()
+        self.assertIn('CRITICAL LMD full scan found malware', output)
+        self.assertIn('WARNING LMD full scan completed with 1 scanner access errors', output)
+
+    def test_eicar_with_access_errors_is_warning(self):
+        self.prepare(1, ['/home/cache/a'])
+        self.append_meta(hits=2)
+        shutil.copyfile(FIXTURES / 'session.eicar.tsv', self.session)
+        output = self.fullscan()
+        self.assertIn('WARNING Full scan contains 2 EICAR/test', output)
+        self.assertIn('WARNING LMD full scan completed with 1 scanner access errors', output)
+        self.assertNotIn('CRITICAL', output)
+
+    def test_exit_one_zero_hits_conflicts(self):
+        self.prepare(1)
+        self.assertIn('CRITICAL LMD scanner failure', self.fullscan())
+
+    def test_parser_unavailable_is_execution_error(self):
+        self.prepare()
+        output = self.run_shell('LMD_SCANNER_PARSER=/nonexistent\n_lmd_check_fullscan')
+        self.assertIn('ERROR LMD scanner reliability parser unavailable', output)
+
+    def test_native_header_bounds_override_lifecycle_start(self):
+        row = (FIXTURES / 'session.index.native').read_text().splitlines()[1].split('\t')
+        start, end = int(row[1]), int(row[1]) + int(row[3])
+        self.scan.unlink()
+        (self.lmd / 'sess/session.index').write_text((FIXTURES / 'session.index.native').read_text())
+        (self.lmd / ('sess/session.tsv.' + row[0])).write_text((FIXTURES / 'session.native.tsv').read_text())
+        (self.lmd / ('sess/scan.meta.' + row[0])).write_text(
+            f'path={row[8]}\nstate=completed\nstarted={start+30}\ncompleted={end}\n')
+        (self.lmd / 'logs/clamscan_log').write_text(self.block(start+2, end, 2, ['/home/cache/a']))
+        output = self.fullscan()
+        self.assertIn('scanner result: access_errors; exit=2', output)
+        self.assertNotIn('scanner result UNKNOWN', output)
+
+    def test_corrupt_gzip_is_unknown(self):
+        self.prepare()
+        (self.lmd / 'logs/clamscan_log-20260920.gz').write_bytes(b'not gzip')
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+
+    def test_duplicate_rotation_is_unknown(self):
+        import gzip
+        self.prepare()
+        (self.lmd / 'logs/clamscan_log-20260920').write_text('')
+        with gzip.open(self.lmd / 'logs/clamscan_log-20260920.gz', 'wt') as file:
+            file.write('')
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
+
+    def test_numeric_rotation_supported(self):
+        self.prepare()
+        block = self.block(code=2, paths=['/home/cache/a'])
+        lines = block.splitlines(keepends=True)
+        (self.lmd / 'logs/clamscan_log.1').write_text(''.join(lines[:-1]))
+        (self.lmd / 'logs/clamscan_log').write_text(lines[-1])
+        self.assertIn('scanner result: access_errors; exit=2', self.fullscan())
+
+    def test_dst_ambiguous_timestamp_is_unknown(self):
+        self.prepare()
+        (self.lmd / 'logs/clamscan_log').write_text(
+            'Oct 25 2026 02:30:00 host clamscan start\n'
+            'Oct 25 2026 02:31:00 host clamscan end return 0\n')
+        self.assertIn('CRITICAL LMD scanner result UNKNOWN', self.fullscan())
 
 
 if __name__ == '__main__':
