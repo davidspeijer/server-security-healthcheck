@@ -418,6 +418,8 @@ class BackendTests(Base):
         result=self.run_main(findings=False,args=('--test-notification',)); self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
     def test_function_replaced_during_check(self):
+        registry=self.library/'checks.registry'
+        registry.write_text(registry.read_text()+'override|checks/override.sh|check_override|CHECK_OVERRIDE|1|custom|-\n')
         (self.library/'checks/override.sh').write_text('hc_register_check override\ncheck_override() { notify_telegram() { :; }; }\n')
         self.failed(); self.assertFalse(self.marker.exists())
 

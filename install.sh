@@ -39,15 +39,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 install -d -m 0755 "$STAGE/checks" "$STAGE/notify" "$STAGE/bin"
-[ -f "$ROOT_DIR/runtime.manifest" ] || { echo 'Runtime manifest missing' >&2; exit 1; }
+# Load trusted repository common code, parse literal registry data, and derive
+# check ownership from it rather than maintaining a second check file list.
+source "$ROOT_DIR/lib/common.sh"
+hc_registry_load
+hc_runtime_manifest "$ROOT_DIR" > "$STAGE/.runtime.manifest"
 while IFS= read -r relative; do
-    [[ "$relative" =~ ^(common.sh|checks/[a-z_]+\.(sh|py)|notify/[a-z_]+\.sh)$ ]] || {
-        echo 'Invalid runtime manifest' >&2; exit 1;
-    }
     [ -f "$ROOT_DIR/lib/$relative" ] || { echo "Required runtime missing: $relative" >&2; exit 1; }
     install -m 0644 "$ROOT_DIR/lib/$relative" "$STAGE/$relative"
-done < "$ROOT_DIR/runtime.manifest"
-install -m 0644 "$ROOT_DIR/runtime.manifest" "$STAGE/.runtime.manifest"
+done < "$STAGE/.runtime.manifest"
+install -m 0644 "$ROOT_DIR/runtime.manifest" "$STAGE/runtime.manifest"
 install -m 0755 "$ROOT_DIR/bin/server-security-healthcheck" "$STAGE/bin/server-security-healthcheck"
 # A launcher pins the chosen release before executing its matching entrypoint.
 {
@@ -75,13 +76,34 @@ for file in "$ACTIVE"/* "$ACTIVE"/.[!.]* "$ACTIVE"/..?*; do
     [ ! -e "$STAGE/${file##*/}" ] && [ ! -L "$STAGE/${file##*/}" ] || continue
     cp -a -- "$file" "$STAGE/${file##*/}"
 done
-for required in common.sh checks/apache.sh checks/clamav.sh checks/disk.sh checks/exim.sh checks/lmd.sh checks/lmd_policy.sh checks/pureftpd.sh checks/rspamd.sh notify/telegram.sh; do
-    [ -f "$STAGE/$required" ] || { echo "Required staged module missing: $required" >&2; exit 1; }
-done
-for file in "$STAGE/common.sh" "$STAGE/launcher" "$STAGE/bin/server-security-healthcheck" "$STAGE"/checks/*.sh "$STAGE"/notify/*.sh; do
-    [ -f "$file" ] || { echo 'Staged shell input is not regular' >&2; exit 1; }
-    bash -n "$file" || { echo 'Staged shell syntax validation failed' >&2; exit 1; }
-done
+# Validate every owned file, including all registered custom checks, before
+# publishing. Preserved unregistered shell companions are not executable inputs.
+while IFS= read -r relative; do
+    [ -f "$STAGE/$relative" ] || { echo "Required staged module missing: $relative" >&2; exit 1; }
+    case "$relative" in *.sh) bash -n "$STAGE/$relative" ;; esac
+done < "$STAGE/.runtime.manifest"
+for file in "$STAGE/launcher" "$STAGE/bin/server-security-healthcheck"; do bash -n "$file"; done
+# Isolate validation definitions from installer state. Never execute check bodies.
+(
+    source "$STAGE/common.sh"
+    hc_registry_load
+    HC_REGISTERED_CHECKS=()
+    for name in "${HC_REG_NAMES[@]}"; do hc_registry_module_load "$name" "$STAGE"; done
+    expected_manifest="$(hc_runtime_manifest "$STAGE")"
+    staged_manifest="$(hc_data_parse bounded "$STAGE/.runtime.manifest")"
+    [ "$expected_manifest" = "$staged_manifest" ] || { echo 'Staged registry/manifest mismatch' >&2; exit 1; }
+    for name in "${HC_REG_NAMES[@]}"; do
+        if [ "${HC_REG_KIND[$name]}" != helper ]; then
+            registered=0
+            for check in "${HC_REGISTERED_CHECKS[@]}"; do [ "$check" != "$name" ] || registered=$((registered + 1)); done
+            [ "$registered" = 1 ] || { echo "Staged check registration mismatch: $name" >&2; exit 1; }
+        fi
+        hc_function_from "${HC_REG_FUNCTION[$name]}" "$STAGE/${HC_REG_MODULE[$name]}" || {
+            echo "Staged function provenance mismatch: $name" >&2; exit 1;
+        }
+    done
+    [ "$HC_ERRORS" -eq 0 ]
+)
 python3 - "$STAGE" <<'PY_VALIDATE'
 import ast, os, sys
 root = sys.argv[1]

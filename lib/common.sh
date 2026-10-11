@@ -80,13 +80,23 @@ _hc_load_config_data() {
         [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
         [[ "$line" =~ $assignment ]] || { hc_status ERROR "$file:$number: expected KEY=value"; return 1; }
         key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+        # Even legacy/manual allowlist additions cannot create an unregistered
+        # enabled check. DIRECTADMIN_WEBROOTS is an existing LMD subcheck.
+        if [[ "$key" = CHECK_* && "$key" != CHECK_DIRECTADMIN_WEBROOTS ]] && [ -z "${HC_REG_KEY[$key]:-}" ]; then
+            hc_status ERROR "$file:$number: unknown configuration key $key (no check registry entry)"
+            return 1
+        fi
+        if [ "$key" = LMD_ENABLED ] && [ "${HC_REG_KEY[CHECK_LMD]:-}" != lmd ]; then
+            hc_status ERROR 'LMD_ENABLED compatibility alias lacks its LMD registry entry'
+            return 1
+        fi
         case "$key" in
             LOOKBACK_HOURS|NOTIFY_TELEGRAM|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
-            CHECK_APACHE|APACHE_SERVICE|CHECK_RSPAMD|RSPAMD_SERVICE|CHECK_PUREFTP|PUREFTP_UPLOADSCAN_SERVICE|\
-            CHECK_EXIM|EXIM_SERVICE|MAILQUEUE_WARN|CHECK_DISK|DISK_WARN_PERCENT|DISK_PATHS|\
-            CHECK_CLAMAV|CLAMAV_SERVICE|CLAMAV_CONFIG_FILE|CLAM_SIG_MAX_AGE_HOURS|FRESHCLAM_MAX_AGE_HOURS|\
+            APACHE_SERVICE|RSPAMD_SERVICE|PUREFTP_UPLOADSCAN_SERVICE|\
+            EXIM_SERVICE|MAILQUEUE_WARN|DISK_WARN_PERCENT|DISK_PATHS|\
+            CLAMAV_SERVICE|CLAMAV_CONFIG_FILE|CLAM_SIG_MAX_AGE_HOURS|FRESHCLAM_MAX_AGE_HOURS|\
             FRESHCLAM_SERVICE|FRESHCLAM_TIMER|FRESHCLAM_ONESHOT_SERVICE|\
-            CHECK_LMD|LMD_ENABLED|LMD_SERVICE|LMD_BIN|LMD_DIR|LMD_AUDIT|LMD_MONITOR_LIST|LMD_WEBROOT_LIST|\
+            LMD_ENABLED|LMD_SERVICE|LMD_BIN|LMD_DIR|LMD_AUDIT|LMD_MONITOR_LIST|LMD_WEBROOT_LIST|\
             LMD_SIG_MAX_AGE_HOURS|LMD_SIGUP_MAX_AGE_HOURS|LMD_UPDATE_FAILURE_LOOKBACK_HOURS|\
             FULLSCAN_MAX_AGE_DAYS|CHECK_DIRECTADMIN_WEBROOTS|DIRECTADMIN_HOME|LMD_MONITOR_REQUIRED|\
             LMD_MONITOR_MAX_IDLE_MINUTES|LMD_MONITOR_PROCESS_PATTERN|LMD_EVENT_LOG|LMD_SESSION_DIR|\
@@ -101,7 +111,7 @@ _hc_load_config_data() {
             LMD_EXPECT_QUARANTINE_SUSPEND_USER|LMD_EXPECT_QUARANTINE_ON_ERROR|LMD_EXPECT_MONITOR_MODE|\
             LMD_EXPECT_INOTIFY_SLEEP|LMD_EXPECT_INOTIFY_RELOADTIME|LMD_EXPECT_IMPORT_CONFIG_URL|\
             LMD_EXPECT_POST_SCAN_HOOK|LMD_EXPECT_CRON_PRUNE_DAYS|LMD_EXPECT_SIGUP_SCHEDULE|LMD_EXPECT_FULLSCAN_SCHEDULE) ;;
-            *) hc_status ERROR "$file:$number: unknown configuration key $key"; return 1 ;;
+            *) [ -n "${HC_REG_KEY[$key]:-}" ] || { hc_status ERROR "$file:$number: unknown configuration key $key"; return 1; } ;;
         esac
         if [[ "$value" = \"* || "$value" = \'* ]]; then
             local quote="${value:0:1}"
@@ -144,7 +154,7 @@ _hc_load_config_data() {
 hc_load_config() {
     local tracing=0 result
     case $- in *x*) tracing=1; set +x ;; esac
-    _hc_load_config_data "$@"; result=$?
+    if hc_registry_load; then _hc_load_config_data "$@"; result=$?; else result=1; fi
     [ "$tracing" = 0 ] || set -x
     return "$result"
 }
@@ -276,4 +286,91 @@ hc_function_from() {
     [ "$debugging" = 1 ] || shopt -u extdebug
     read -r name line origin <<< "$declaration"
     [ "$name" = "$function" ] && [ "$origin" = "$expected" ]
+}
+
+# Literal registry data: never eval/source it. Installer and runtime share this
+# parser, contract loader and generated ownership manifest.
+HC_REGISTRY_ROOT="$(cd -P -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+declare -a HC_REG_NAMES=()
+declare -A HC_REG_MODULE=() HC_REG_FUNCTION=() HC_REG_KEY=() HC_REG_DEFAULT=() HC_REG_KIND=() HC_REG_DEP=() HC_REG_CONFIG=()
+HC_REGISTRY_READY=0
+hc_registry_load() {
+    [ "$HC_REGISTRY_READY" = 0 ] || return 0
+    local contents line name module function key default kind dependency extra
+    local -A modules=() functions=()
+    contents="$(hc_data_parse bounded "$HC_REGISTRY_ROOT/checks.registry")" || {
+        hc_status ERROR 'Check registry missing or unreadable'; return 1;
+    }
+    HC_REG_NAMES=(); HC_REG_KEY=()
+    while IFS= read -r line; do
+        [[ "$line" = \#* || -z "$line" ]] && continue
+        IFS='|' read -r name module function key default kind dependency extra <<< "$line"
+        if [[ ! "$line" =~ ^[^\|]+\|[^\|]+\|[^\|]+\|[^\|]+\|[^\|]+\|[^\|]+\|[^\|]+$ ]] ||
+           [[ ! "$name" =~ ^[a-z][a-z0-9_]*$ || ! "$module" =~ ^checks/[a-z][a-z0-9_]*\.sh$ ||
+              ! "$function" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ || ! "$kind" =~ ^(builtin|custom|helper)$ ]] ||
+           [ -n "${HC_REG_MODULE[$name]:-}" ] || [ -n "${modules[$module]:-}" ] || [ -n "${functions[$function]:-}" ]; then
+            hc_status ERROR "Invalid or duplicate check registry entry: $line"; return 1
+        fi
+        if [ "$kind" = helper ]; then
+            [ "$key:$default:$dependency" = '-:-:-' ] || { hc_status ERROR 'Invalid helper registry entry'; return 1; }
+        elif [[ ! "$key" =~ ^CHECK_[A-Z][A-Z0-9_]*$ || ! "$default" =~ ^(0|1|auto)$ ]] ||
+             [ "$key" = CHECK_DIRECTADMIN_WEBROOTS ] || [ -n "${HC_REG_KEY[$key]:-}" ] ||
+             { [ "$dependency" != - ] && [ "${HC_REG_KIND[$dependency]:-}" != helper ]; }; then
+            hc_status ERROR "Invalid registry config/dependency: $name"; return 1
+        else
+            HC_REG_KEY[$key]="$name"
+        fi
+        HC_REG_NAMES+=("$name"); modules[$module]=1; functions[$function]=1
+        HC_REG_MODULE[$name]="$module"; HC_REG_FUNCTION[$name]="$function"
+        HC_REG_CONFIG[$name]="$key"; HC_REG_DEFAULT[$name]="$default"; HC_REG_KIND[$name]="$kind"; HC_REG_DEP[$name]="$dependency"
+    done <<< "$contents"
+    [ "${#HC_REG_NAMES[@]}" -gt 0 ] || { hc_status ERROR 'Empty check registry'; return 1; }
+    HC_REGISTRY_READY=1
+}
+
+hc_registry_module_load() {
+    local name="$1" module="$2/${HC_REG_MODULE[$1]}" function="${HC_REG_FUNCTION[$1]}"
+    local start=${#HC_REGISTERED_CHECKS[@]} status source_failed=0
+    if [ ! -f "$module" ]; then hc_status ERROR "Required check module missing: $module"; return 1; fi
+    if [ ! -r "$module" ]; then hc_status ERROR "Check module unreadable: $module"; return 1; fi
+    bash -n "$module" || { hc_status ERROR "Check module syntax error: $module"; return 1; }
+    unset -f "$function"
+    # A failing dependency source followed by a successful registration must not
+    # mask failure. Called outside conditionals so ERR observes those failures.
+    set -E
+    trap 'source_failed=1' ERR
+    source "$module"
+    status=$?
+    trap - ERR
+    set +E
+    if [ "$status" != 0 ] || [ "$source_failed" != 0 ]; then
+        hc_status ERROR "Check module source failed: $module"; return 1
+    fi
+    if ! hc_function_from "$function" "$module"; then
+        hc_status ERROR "Check module function missing or unexpected provenance; not registered: $name"
+        [ "$name" != lmd_policy ] || hc_status ERROR 'LMD policy module function missing'
+        return 1
+    fi
+    if [ "${HC_REG_KIND[$name]}" = helper ]; then
+        [ "${#HC_REGISTERED_CHECKS[@]}" = "$start" ] || { hc_status ERROR "Unexpected helper registration: $name"; return 1; }
+    elif [ "${#HC_REGISTERED_CHECKS[@]}" != "$((start + 1))" ] || [ "${HC_REGISTERED_CHECKS[$start]:-}" != "$name" ]; then
+        hc_status ERROR "Check module not registered with expected name: $name"; return 1
+    fi
+    return 0
+}
+
+hc_runtime_manifest() {
+    local root="$1" contents relative name
+    local -A owned=()
+    contents="$(hc_data_parse bounded "$root/runtime.manifest")" || { hc_status ERROR 'Runtime manifest unavailable'; return 1; }
+    while IFS= read -r relative; do
+        [[ "$relative" =~ ^(common\.sh|checks\.registry|checks/[a-z_]+\.py|notify/[a-z_]+\.sh)$ ]] &&
+        [ -z "${owned[$relative]:-}" ] || { hc_status ERROR 'Invalid or duplicated runtime manifest'; return 1; }
+        owned[$relative]=1
+        printf '%s\n' "$relative"
+    done <<< "$contents"
+    [ "${owned[common.sh]:-0}" = 1 ] && [ "${owned[checks.registry]:-0}" = 1 ] || {
+        hc_status ERROR 'Runtime manifest lacks common/registry'; return 1;
+    }
+    for name in "${HC_REG_NAMES[@]}"; do printf '%s\n' "${HC_REG_MODULE[$name]}"; done
 }

@@ -1,0 +1,9 @@
+# name|module relative to lib|function|enable key|default|kind|dependency name
+lmd_policy|checks/lmd_policy.sh|_lmd_check_configuration|-|-|helper|-
+apache|checks/apache.sh|check_apache|CHECK_APACHE|auto|builtin|-
+rspamd|checks/rspamd.sh|check_rspamd|CHECK_RSPAMD|auto|builtin|-
+pureftpd|checks/pureftpd.sh|check_pureftpd|CHECK_PUREFTP|auto|builtin|-
+exim|checks/exim.sh|check_exim|CHECK_EXIM|0|builtin|-
+disk|checks/disk.sh|check_disk|CHECK_DISK|0|builtin|-
+clamav|checks/clamav.sh|check_clamav|CHECK_CLAMAV|0|builtin|-
+lmd|checks/lmd.sh|check_lmd|CHECK_LMD|0|builtin|lmd_policy

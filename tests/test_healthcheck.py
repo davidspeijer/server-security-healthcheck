@@ -604,6 +604,8 @@ notify_telegram "$long"
         with (library / 'notify/telegram.sh').open('a') as file:
             file.write('\ncurl() { local input; input="$(cat)"; printf "%b" "$input" > ' + Q(str(marker)) +
                        f'; printf \'%s\' \'{{"ok":true}}\'; return {curl_status}; }}\n')
+        with (library / 'checks.registry').open('a') as registry:
+            registry.write('error_fixture|checks/error_fixture.sh|check_error_fixture|CHECK_ERROR_FIXTURE|1|custom|-\n')
         (library / 'checks/error_fixture.sh').write_text(
             'hc_register_check error_fixture\ncheck_error_fixture() {\n' + body + '\n}\n')
         config = f'NOTIFY_TELEGRAM={int(enabled)}\nTELEGRAM_BOT_TOKEN=123:fixture_token\nTELEGRAM_CHAT_ID=123\n'
@@ -1076,6 +1078,8 @@ _lmd_check_configuration
         marker = self.work / 'captured curl arguments'
         with (library / 'notify/telegram.sh').open('a') as file:
             file.write('\ncurl() { local input; input="$(cat)"; printf "%b" "$input" > ' + Q(str(marker)) + '; printf \'%s\' \'{"ok":true}\'; }\n')
+        with (library / 'checks.registry').open('a') as registry:
+            registry.write('notification_fixture|checks/notification_fixture.sh|check_notification_fixture|CHECK_NOTIFICATION_FIXTURE|1|custom|-\n')
         (library / 'checks/notification_fixture.sh').write_text(
             'hc_register_check notification_fixture\n'
             'check_notification_fixture() { local i; for i in {1..100}; do hc_warn "Configuration policy drift in setting number $i requiring review"; done; hc_status CRITICAL "LMD full scan found malware"; }\n')
