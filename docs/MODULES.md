@@ -115,8 +115,12 @@ example setting and tests. Configuration and registry files are literal data:
 never use eval, shell expansion or source on them or on product configuration.
 A module may explicitly source a trusted helper, but must propagate dependency
 failures. Missing helper sources and uncaught command failures are execution
-errors, even when a later command succeeds. Hidden companion preservation
-(PH07) is unchanged; a missing dependency cannot make a check healthy.
+errors, even when a later command succeeds. Upgrades preserve ordinary and
+hidden unmanaged companion files, directories and symlinks without following
+symlink targets. New staged project files win name conflicts; previously owned
+obsolete files are omitted. Preservation failures block activation and retain
+the previous release. The custom containers `checks/`, `notify/` and `bin/`
+must be directories rather than symlinks. A missing dependency remains ERROR.
 
 ## Optional components
 

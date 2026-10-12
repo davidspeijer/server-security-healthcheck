@@ -60,11 +60,15 @@ chmod 0755 "$STAGE/launcher"
 
 # Preserve extensions unless the previous manifest proves project ownership.
 for directory in checks notify bin; do
-    for file in "$ACTIVE/$directory"/*; do
+    [ ! -L "$ACTIVE/$directory" ] || { echo "Unsafe custom container symlink: $directory" >&2; exit 1; }
+    for file in "$ACTIVE/$directory"/* "$ACTIVE/$directory"/.[!.]* "$ACTIVE/$directory"/..?*; do
         [ -e "$file" ] || [ -L "$file" ] || continue
         relative="$directory/${file##*/}"
-        [ ! -e "$STAGE/$relative" ] || continue
-        if [ -f "$ACTIVE/.runtime.manifest" ] && grep -Fxq -- "$relative" "$ACTIVE/.runtime.manifest"; then
+        [ ! -e "$STAGE/$relative" ] && [ ! -L "$STAGE/$relative" ] || {
+            printf 'Preservation conflict: staged project entry wins: %s\n' "$relative"
+            continue
+        }
+        if [[ "$relative" != *$'\n'* ]] && [ -f "$ACTIVE/.runtime.manifest" ] && grep -Fxq -- "$relative" "$ACTIVE/.runtime.manifest"; then
             continue
         fi
         cp -a -- "$file" "$STAGE/$relative"

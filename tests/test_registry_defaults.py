@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from isolation import isolated_env
 import test_ph11_registry as registry_tests
 
 ROOT = registry_tests.ROOT
@@ -15,14 +16,14 @@ MATRIX = [('0', None, '0'), ('1', None, '1'), ('auto', None, 'auto'),
 
 class EffectiveStateTests(unittest.TestCase):
     def setUp(self):
+        (ROOT/'tmp').mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=ROOT/'tmp', prefix='registry-default-')
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name)
         self.lib = self.work/'lib'
         shutil.copytree(ROOT/'lib', self.lib)
         self.config = self.work/'config'; self.config.mkdir()
-        self.env = {key: value for key, value in os.environ.items()
-                    if not key.startswith('CHECK_') and key != 'LMD_ENABLED'}
+        self.env = isolated_env(self.work)
         self.env.update(SSHC_CONFIG_DIR=str(self.config), SSHC_LIB_DIR=str(self.lib))
         # No real service calls. Discovery either proves presence/absence or fails.
         with (self.lib/'common.sh').open('a') as stream:

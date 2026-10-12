@@ -128,8 +128,12 @@ fi
 case "${1:-}" in
     --test-notification)
         if [ "$HC_NOTIFY_READY" = 1 ] && hc_function_from notify_test "${NOTIFY_DIR}/telegram.sh"; then
-            notify_test
-            exit $?
+            if notify_test; then
+                [ "$HC_ERRORS" -eq 0 ] || exit 2
+                exit 0
+            fi
+            hc_status ERROR 'Test notification execution failed'
+            exit 2
         fi
         hc_log "ERROR no notification backend with notify_test found"
         exit 2

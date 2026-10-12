@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from isolation import isolated_env
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / 'tests/fixtures'
@@ -21,7 +22,8 @@ NOW = 1789891200  # 2026-09-20 08:00 UTC / 10:00 Europe/Amsterdam
 
 class HealthcheckTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='sshc tests ')
+        (ROOT/'tmp').mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=ROOT/'tmp', prefix='sshc tests ')
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name)
         self.lmd = self.work / 'lmd'
@@ -36,7 +38,7 @@ class HealthcheckTests(unittest.TestCase):
         shutil.copyfile(FIXTURES / 'scan.meta.completed', self.scan)
         self.session = self.lmd / 'sess/session.tsv.260920-0030.1260922'
         (self.work / 'empty audit').write_text('')
-        self.env = dict(os.environ, TZ='Europe/Amsterdam', LC_ALL='C')
+        self.env = isolated_env(self.work, 'Europe/Amsterdam')
 
     def run_shell(self, script, expected=0, reliability=False):
         prefix = f'''set -u -o pipefail
@@ -47,6 +49,11 @@ source {Q(str(ROOT / 'lib/checks/lmd_policy.sh'))}
 source {Q(str(ROOT / 'lib/checks/clamav.sh'))}
 LMD_DIR={Q(str(self.lmd))}
 LMD_AUDIT={Q(str(self.work / 'empty audit'))}
+LMD_SYSCONFIG_FILE={Q(str(self.work / 'absent sysconfig'))}
+LMD_DEFAULT_FILE={Q(str(self.work / 'absent defaults'))}
+LMD_DAILY_CRON_FILE={Q(str(self.work / 'absent daily'))}
+LMD_SIGUP_CRON_FILE={Q(str(self.work / 'absent sigup cron'))}
+LMD_FULLSCAN_CRON_FILE={Q(str(self.work / 'absent fullscan cron'))}
 date() {{ if [ "$*" = +%s ]; then printf '%s\\n' {NOW}; else command date "$@"; fi; }}
 systemctl() {{ return 0; }}
 pgrep() {{ return 0; }}
@@ -414,6 +421,12 @@ CHECK_EXIM=0
 CHECK_CLAMAV=0
 CHECK_LMD=0
 '''
+        config += 'LMD_AUDIT='+Q(str(self.work/'empty audit'))+'\n'
+        config += 'LMD_DIR='+Q(str(self.lmd))+'\n'
+        config += 'DIRECTADMIN_HOME='+Q(str(self.work/'absent home'))+'\n'
+        for key in ['LMD_SYSCONFIG_FILE','LMD_DEFAULT_FILE','LMD_DAILY_CRON_FILE',
+                    'LMD_SIGUP_CRON_FILE','LMD_FULLSCAN_CRON_FILE','CLAMAV_CONFIG_FILE']:
+            config += key+'='+Q(str(self.work/('absent-'+key.lower())))+'\n'
         (config_dir / 'healthcheck.conf').write_text(config + content)
         env = dict(self.env, SSHC_CONFIG_DIR=str(config_dir), SSHC_LIB_DIR=str(lib_dir or ROOT / 'lib'))
         return subprocess.run([BASH, str(ROOT / 'bin/server-security-healthcheck'), *args],
@@ -424,7 +437,7 @@ CHECK_LMD=0
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_exit_warning(self):
-        result = self.main('LMD_ENABLED=1\nLMD_DIR=/no/such/lmd\n')
+        result = self.main('LMD_ENABLED=1\nLMD_DIR='+Q(str(self.work/'absent-lmd'))+'\n')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('WARNING', result.stdout)
 
@@ -441,7 +454,7 @@ CHECK_LMD=0
         self.assertEqual(self.main('', ['--unknown']).returncode, 2)
 
     def test_lmd_enabled_overrides_legacy(self):
-        result = self.main('CHECK_LMD=1\nLMD_ENABLED=0\nLMD_DIR=/no/such/lmd\n')
+        result = self.main('CHECK_LMD=1\nLMD_ENABLED=0\nLMD_DIR='+Q(str(self.work/'absent-lmd'))+'\n')
         self.assertEqual(result.returncode, 0)
 
     def test_telegram_truncates_without_sending(self):
@@ -496,7 +509,7 @@ notify_telegram "$long"
 
     def install_root(self):
         if not hasattr(self, '_install_root'):
-            directory = tempfile.TemporaryDirectory(prefix='sshc-install-')
+            directory = tempfile.TemporaryDirectory(dir=ROOT/'tmp', prefix='sshc-install-')
             self.addCleanup(directory.cleanup)
             self._install_root = Path(directory.name)
         return self._install_root

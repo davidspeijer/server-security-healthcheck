@@ -239,9 +239,9 @@ class RegistryInstallerTests(installers.Base):
         self.good(); self.assertTrue((self.active/'checks/local.sh').exists())
         self.assertEqual(self.run_active().returncode,1); self.assertFalse(marker.exists())
 
-    def test_hidden_dependency_loss_fails_upgrade_without_fixing_PH07(self):
+    def test_hidden_dependency_preserved_on_upgrade(self):
         self.custom(); self.good(); old=self.active.resolve(); hidden=self.active/'checks/.hidden-helper'
         hidden.write_text('local_dependency() { :; }\n')
         module=self.source/'lib/checks/mariadb.sh'
         module.write_text('source "$(dirname "${BASH_SOURCE[0]}")/.hidden-helper"\nhc_register_check mariadb\ncheck_mariadb() { local_dependency; }\n')
-        result=self.install(); self.assertNotEqual(result.returncode,0); self.assertEqual(self.active.resolve(),old); self.assertTrue(hidden.exists())
+        result=self.install(); self.assertEqual(result.returncode,0,result.stdout+result.stderr); self.assertNotEqual(self.active.resolve(),old); self.assertTrue(old.exists()); self.assertTrue(hidden.exists()); self.assertTrue((self.active/'checks/.hidden-helper').exists()); self.assertEqual(self.run_active().returncode,0)

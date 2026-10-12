@@ -19,7 +19,8 @@ Exim queue/service, ClamAV/FreshClam and Linux Malware Detect (LMD). DirectAdmin
 webroot discovery is an optional part of LMD monitoring, not a dependency.
 
 Required: Bash 4+, GNU coreutils (including `date` and `stat`), grep, sed, awk,
-findutils, and hostname. Required command availability and GNU date support are
+findutils, and hostname (`hostname` package on EL and Debian-family systems).
+Required command availability and GNU date support are
 checked before checks run. Service checks need systemd; ClamAV needs journalctl;
 LMD realtime monitoring needs procps/pgrep. Python 3.6+ (standard library only) is required at startup for bounded configuration
 reading, and for LMD scanner/metadata, ClamAV/FreshClam, audit JSON, systemd
@@ -506,6 +507,9 @@ Set `NOTIFY_TELEGRAM=1` in `healthcheck.conf` and set `TELEGRAM_BOT_TOKEN` and
 ```bash
 sudo server-security-healthcheck --test-notification
 ```
+
+`--test-notification` returns 0 on success and 2 for configuration, backend,
+transport or Telegram API failures. It never reports a security finding (exit 1).
 
 Warnings, critical findings and execution errors reported by checks trigger normal
 notifications when Telegram is enabled. Critical findings come first, followed by

@@ -178,7 +178,7 @@ _clamav_check_databases''')
     def test_malformed_config(self):
         self.assertIn('UNKNOWN', self.db_check(config='DatabaseDirectory relative\n'))
     def test_missing_config(self):
-        self.assertIn('UNKNOWN', self.run_shell('CLAMAV_CONFIG_FILE=/no/fixture/config\n_clamav_check_databases'))
+        self.assertIn('UNKNOWN', self.run_shell('CLAMAV_CONFIG_FILE='+Q(str(self.work/'absent-config'))+'\n_clamav_check_databases'))
     def test_cld_format(self):
         self.assertNotIn('ERROR', self.db_check([('daily.cld',1),('main.cld',1)]))
     def test_partial_update_not_database(self):
@@ -310,7 +310,7 @@ class DailyPolicyTests(Fixtures):
 
     def stock_contract(self, transform=lambda text:text, expected=0):
         self.policy_setup()
-        text=data.DAILY_STOCK_2_0_1.replace("inspath='/usr/local/maldetect'", "inspath='"+str(self.lmd)+"'")
+        text=(fixture.FIXTURES/'maldet.daily.stock-2.0.1').read_text().replace("inspath='/usr/local/maldetect'", "inspath='"+str(self.lmd)+"'")
         self.policy_daily.write_text(transform(text))
         self.run_shell(f'_lmd_daily_contract {Q(str(self.policy_daily))}',expected)
     def test_full_stock_2_0_1_contract(self): self.stock_contract()

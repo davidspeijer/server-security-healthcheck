@@ -1,86 +1,166 @@
 # Architecture
 
-## Core
+## Registry and orchestration
 
-The main executable is an orchestrator only. It:
+The main executable orchestrates configuration, required module loading, check
+invocation, result aggregation and notification. Service-specific logic belongs
+in check modules. There is no wildcard discovery of check or notification modules:
+an unrelated `.sh` file in `checks/` or `notify/` is not automatically sourced.
 
-1. loads configuration;
-2. loads shared helpers;
-3. discovers notification modules;
-4. discovers check modules;
-5. executes registered checks;
-6. aggregates warnings and context;
-7. sends a notification only when problems exist.
+`lib/checks.registry` is literal declarative data shared by installer and runtime.
+Its seven fields are `name|module|function|enable key|default|kind|dependency`.
+It maps each check to a module path relative to `lib`, an expected function,
+a configuration key and a default (`0`, `1`, or `auto`). Kinds are `builtin`,
+`custom`, and `helper`. Names, module paths, functions and enable keys must be
+unique. A dependency names an earlier helper; helpers have no enable key or
+default, and do not register an executable check. The LMD policy helper is loaded
+for its dependent LMD check.
 
-It should not contain service-specific logic.
+The registry supplies dependency and selection metadata; component discovery
+itself belongs to the registered check function. It does not encode or verify
+all discovery logic. Installer and runtime use the same registry parser, module
+loader and ownership-manifest generator in `lib/common.sh`.
 
-## Check module contract
+The lifecycle is registry validation → configuration/default resolution →
+manifest/install contract → required module loading → function provenance
+validation → invocation → execution accounting. Installation is a separate phase
+that stages and validates all registered modules before publication. Runtime
+resolves configuration and selects the checks required for that invocation.
 
-A check module:
+## Configuration and effective enable state
 
-1. calls `hc_register_check <name>` when loaded;
-2. defines a function `check_<name>`;
-3. uses `hc_warn` for health problems;
-4. uses `hc_detail` for useful context;
-5. must not modify system state.
+Configuration is bounded, allowlisted, typed literal data, never sourced or
+expanded as shell code. Explicit configuration overrides the registry default;
+only an unset enable variable falls back to that default. The effective modes
+are `0` (disabled), `1` (required), and `auto` (required check with component
+discovery). `CHECK_DISK` remains boolean. `CHECK_DIRECTADMIN_WEBROOTS` is a boolean
+LMD subcheck rather than a registry check. `CHECK_PUREFTP` maps to `pureftpd`.
+The compatibility alias `LMD_ENABLED` takes priority over `CHECK_LMD`.
 
-Example:
+Unknown keys, unregistered `CHECK_*` keys (except the explicit subcheck above),
+invalid values and malformed registry entries produce ERROR / exit 2. Additional
+non-enable module settings still require explicit config-parser validation.
 
-```bash
-hc_register_check example
+The entrypoint snapshots each effective enable value and publishes it before
+loading modules. Immediately before invoking a selected check it reasserts that
+value and reads it back; failed publication or restoration is ERROR. Both LMD
+variables receive the resolved LMD value. This makes existing module guards
+consume the same value used for selection, including registry defaults.
 
-check_example() {
-    hc_enabled "${CHECK_EXAMPLE:-0}" || return 0
+## Check loading and execution contract
 
-    if something_is_wrong; then
-        hc_warn "Example: something is wrong"
-    fi
+A check must have a registry entry matching its module file, expected function
+and enable key. Required modules must be regular, readable files, pass `bash -n`,
+and source successfully. Each non-helper module calls `hc_register_check` exactly
+once with its registered name and defines the expected function in that same
+file. Helpers add no check registration. Definition-file provenance is checked
+using `hc_function_from`; a function supplied by another file is insufficient.
 
-    hc_detail "Example value: 123"
-}
-```
+For normal execution, `1` and `auto` require loading and invocation; `0` skips
+the check and need not have a module present at runtime. `--list-checks` also
+loads disabled registered checks to list registrations. Required helpers must
+load successfully. Before invocation the entrypoint rechecks registration count,
+function provenance and effective enable state. A required check that was not
+invoked records ERROR. Missing modules, invalid syntax, source failures,
+registration mismatches and dependency or provenance failures produce exit 2.
 
-## Notification module contract
+Check functions record findings and return zero after doing so. Nonzero returns
+and uncaught command failures are execution errors, even if a later command
+succeeds. Expected nonzero discovery results must be handled explicitly. The
+orchestrator does not rely on global `set -e`. Execution accounting proves that
+a function was invoked; it cannot prove that arbitrary module code performed
+its intended semantic work. Registered shell modules remain trusted code sharing
+the runtime shell, rather than sandboxed plugins.
 
-Notification backends expose a function such as:
+Practical authoring steps and examples are in [MODULES.md](MODULES.md).
 
-```bash
-notify_telegram "message"
-```
+## Auto discovery
 
-A notification backend must not depend on configuration from another product.
+`auto` discovers the component through an already registered and invoked check;
+it does not search for module files. Discovery distinguishes PRESENT, ABSENT
+(reported as NOT_APPLICABLE), and FAILED. Absence is valid only after successful
+discovery; failed or malformed discovery records ERROR / exit 2 rather than
+NOT_APPLICABLE or a healthy result.
 
-## Safety boundary
+For service checks, `hc_service_present` accepts a known fallback executable or
+a validated unit-file listing as presence. A successful empty listing indicates
+absence; unavailable commands, failed queries and malformed listings indicate
+failure. Component-specific checks implement their own bounded discovery and
+read contracts.
 
-Checks are read-only.
+## Notification backend
 
-A future remediation system, if ever added, should be a separate program rather
-than mixing remediation with health monitoring.
+Telegram is the currently supported selected backend. When `NOTIFY_TELEGRAM=1`
+or `--test-notification` is requested, `notify/telegram.sh` is required even on
+a healthy run. It must be regular and readable, pass syntax validation and
+source successfully, and supply both `notify_telegram` and `notify_test` from
+that file. Their provenance is checked after loading check modules and again
+after check execution, before using the backend. A missing or broken selected
+backend is an execution failure / exit 2.
 
-## v0.4.0 execution and safety
+A Telegram send succeeds only when curl transport succeeds and the bounded JSON
+response contains boolean `ok: true`. Empty, malformed or rejected responses
+and transport failures fail the send. Credentials are validated, tracing is
+suppressed around credential handling, and curl receives credentials through
+stdin configuration rather than credential-bearing arguments or temporary files.
+Long messages are truncated with a pointer to local diagnostics; failed sends
+retain the message on stderr.
 
-Configuration is parsed as literal assignments with allowed names, typed numeric
-values and validated policy enums; it is no longer sourced as shell code.
-`hc_require_dependencies` checks the generic commands and GNU date. Integration
-modules check their own requirements after checking enablement/availability.
+Normal runs send notifications when findings or execution errors exist, provided
+the selected backend is ready. Healthy runs do not send. `--test-notification`
+returns 0 on success and 2 on failure; it does not return the findings status 1.
 
-`hc_status PASS|INFO|WARNING|CRITICAL|ERROR` emits immediate CLI diagnostics.
-WARNING/CRITICAL add notification findings; ERROR increments `HC_ERRORS` and causes
-exit 2. `hc_warn` remains a compatibility helper for WARNING; `hc_detail` emits INFO
-and adds notification context. INFO/PASS never change the exit status. Modules
-must report execution errors explicitly rather than relying on their final shell
-command's return code; no global `set -e` is introduced.
+## Installer and runtime release
 
-LMD session metadata and logs are read as data. No `maldet` process is invoked.
-See [LMD parsing](LMD-PARSING.md) for data formats and selection assumptions.
-Coverage uses private scratch files; cleanup is restricted to those files.
-Telegram truncates large summaries while local output retains full diagnostics.
-Installation/removal scripts perform their explicit administrative tasks outside
-the read-only check contract and preserve existing user configuration.
+The root `runtime.manifest` lists core library files. The installer expands it
+with every check-module path from the registry into the staged release's
+`.runtime.manifest`, and copies the core manifest as `runtime.manifest`.
+Installer and runtime do not maintain independent check-module lists. All
+registered source modules must be available for installation, including disabled
+and custom checks.
 
+Before activation, the installer validates owned shell syntax, entrypoint and
+launcher syntax, Python helper ASTs, all registered module loads, registration
+counts, function provenance and the expanded manifest. Validation sources trusted
+modules in a subshell but does not invoke check bodies. At startup, an installed
+runtime compares its expanded ownership manifest with the shared generator's
+output; inconsistent or missing installed metadata is ERROR / exit 2. Direct
+source-tree fixtures without an installed entrypoint may omit that metadata,
+while retaining the required-module contract.
 
-LMD policy helpers in `lib/checks/lmd_policy.sh` are loaded with the check modules
-but do not register a standalone integration. `check_lmd` calls them only after
-LMD enablement/availability checks. Live-file expectations, bounded cron/unit
-recognition and historical scan evidence remain distinct. Policy parsing is
-read-only, and unknown shell constructs never become a healthy effective value.
+Staging occurs beside the active runtime. Activation publishes an active-release
+symlink by atomic rename; the launcher resolves and pins a release so its
+entrypoint and library match. Ordinary and hidden unmanaged files, directories
+and symlinks are preserved with `cp -a`, without following symlink targets.
+Staged project entries win conflicts, and obsolete entries proven owned by the
+previous manifest are omitted. The `checks/`, `notify/` and `bin/` containers
+must not themselves be symlinks. Preservation failures block activation.
+
+Handled failures before activation retain the previous runtime. Prior releases
+and migration backups are kept for explicit rollback. Migrating a legacy real
+runtime directory involves a rename window; this is not an absolute crash or
+power-loss guarantee. Configuration examples and systemd units are refreshed
+separately before runtime activation, while existing configuration is preserved.
+They and launcher publication are not one transaction with the runtime pointer.
+Failures after activation leave the validated runtime selected and require retry.
+
+## Results and read-only boundary
+
+`hc_status` reports PASS, INFO, WARNING, CRITICAL or ERROR immediately.
+`hc_warn` records WARNING and `hc_detail` adds INFO context. WARNING/CRITICAL
+produce findings status 1; execution ERROR takes precedence with status 2.
+A normal run without findings or errors returns 0. PASS and INFO do not change
+the exit status. Errors do not suppress notification of other findings.
+
+Checks inspect services, bounded configuration/log inputs and validated snapshots;
+they must not modify system state. Product configuration is read as data, not
+executed. LMD inspection uses logs and metadata and never starts `maldet` or a
+scan. Its parser has byte, line and time budgets and private scratch cleanup;
+see [LMD-PARSING.md](LMD-PARSING.md). Unknown policy values are not reported as
+verified healthy settings. Installer and remover are separate administrative
+programs; remediation does not belong in check functions.
+
+These validation boundaries reject missing required checks, malformed registries,
+unknown enable keys, unexpected function origins and broken selected backends.
+They do not make arbitrary trusted module code safe or prove all component
+behavior. The runtime never grants automatic execution to wildcard module files.

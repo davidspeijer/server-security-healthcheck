@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+from isolation import isolated_env
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib/checks'))
@@ -25,10 +26,11 @@ Q = shlex.quote
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='round3-')
+        (ROOT/'tmp').mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=ROOT/'tmp', prefix='round3-')
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name)
-        self.env = dict(os.environ, TZ='UTC', LC_ALL='C')
+        self.env = isolated_env(self.work)
 
     def shell(self, code):
         return subprocess.run(['bash', '-c', 'set -uo pipefail\nsource '+Q(str(ROOT/'lib/common.sh'))+'\n'+code], env=self.env, text=True, capture_output=True, timeout=15)
@@ -92,7 +94,12 @@ class ResourceTests(Base):
         result=subprocess.run(['python3',str(ROOT/'lib/checks/lmd_scanner.py'),str(self.work),str(start),str(end)],env=env,text=True,capture_output=True,timeout=3)
         self.assertTrue(result.stdout.startswith('unknown\t')); self.assertNotIn('clean',result.stdout)
     def test_python36(self):
-        result=subprocess.run(['python3','-c','import sys; sys.path.insert(0,sys.argv[1]); import bounded_input, health_data, lmd_scanner',str(ROOT/'lib/checks')],capture_output=True,text=True)
+        interpreter = shutil.which('python3.6') or shutil.which('python3')
+        if not interpreter: self.skipTest('Python 3.6 unavailable')
+        version=subprocess.run([interpreter,'-c','import sys; print("%s.%s" % sys.version_info[:2])'],capture_output=True,text=True,env=self.env)
+        if version.returncode != 0 or version.stdout.strip() != '3.6':
+            self.skipTest('Available interpreter is not Python 3.6')
+        result=subprocess.run([interpreter,'-c','import sys; assert sys.version_info[:2] == (3,6); sys.path.insert(0,sys.argv[1]); import bounded_input, health_data, lmd_scanner',str(ROOT/'lib/checks')],capture_output=True,text=True,env=self.env)
         self.assertEqual(result.returncode,0,result.stderr)
     def test_device(self):
         with self.assertRaises(ValueError): list(bounded.lines('/dev/null'))
@@ -318,7 +325,29 @@ class InstallerTests(Base):
     def test_custom_preserved(self):
         self.good(); old=self.active/'checks/custom.sh'; old.write_text('# custom\n'); (self.active/'custom-data').write_text('companion'); external=self.work/'external'; external.write_text('untouched'); (self.active/'launcher').unlink(); (self.active/'launcher').symlink_to(external); self.good(); self.assertEqual(external.read_text(),'untouched'); self.assertEqual((self.active/'checks/custom.sh').read_text(),'# custom\n'); self.assertEqual((self.active/'custom-data').read_text(),'companion')
     def test_half_built(self):
-        self.good(); before=self.active.resolve(); half=self.dest/'usr/local/lib/.server-security-healthcheck-releases/half'; half.mkdir(); (half/'common.sh').write_text('bad'); self.assertEqual(self.active.resolve(),before)
+        self.good(); before=self.active.resolve()
+        releases_before=sorted(p.name for p in before.parent.iterdir())
+        entry=self.source/'bin/server-security-healthcheck'
+        old_entry=(before/'bin/server-security-healthcheck').read_bytes()
+        entry.write_text(entry.read_text().replace('APP_VERSION="0.5.3"','APP_VERSION="0.5.3-interrupted"'))
+        text=(ROOT/'install.sh').read_text()
+        for prefix in ['/usr/local/','/etc/']: text=text.replace(prefix,str(self.dest)+prefix)
+        text='\n'.join('ROOT_DIR='+Q(str(self.source)) if line.startswith('ROOT_DIR=') else line for line in text.splitlines())
+        text=text.replace('mv -Tf -- "$NEXT" "$ACTIVE"','kill -TERM $$\nmv -Tf -- "$NEXT" "$ACTIVE"')
+        result=subprocess.run(['bash','-c','id() { echo 0; }; systemctl() { return 0; };\n'+text],env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertNotEqual(result.returncode,0); self.assertEqual(self.active.resolve(),before)
+        self.assertFalse(list(self.active.parent.glob('server-security-healthcheck.next.*')))
+        self.assertEqual(sorted(p.name for p in before.parent.iterdir()),releases_before)
+        launcher=self.dest/'usr/local/sbin/server-security-healthcheck'
+        result=subprocess.run([str(launcher),'--version'],env=dict(self.env,SSHC_LIB_DIR=str(before),SSHC_CONFIG_DIR=str(self.dest/'etc/server-security-healthcheck')),text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('interrupted',result.stdout)
+        self.assertEqual((before/'bin/server-security-healthcheck').read_bytes(),old_entry)
+        config=self.work/'interruption-config';config.mkdir()
+        (config/'healthcheck.conf').write_text('NOTIFY_TELEGRAM=0\nCHECK_APACHE=0\nCHECK_RSPAMD=0\nCHECK_PUREFTP=0\nCHECK_EXIM=0\nCHECK_DISK=0\nCHECK_CLAMAV=0\nCHECK_LMD=0\nLMD_ENABLED=0\n')
+        result=subprocess.run([str(launcher)],env=dict(self.env,SSHC_LIB_DIR=str(before),SSHC_CONFIG_DIR=str(config)),text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn('all enabled checks passed',result.stdout)
     def test_shell_syntax(self):
         self.good(); before=self.active.resolve(); (self.source/'lib/checks/disk.sh').write_text('if then\n'); result=self.install(); self.assertNotEqual(result.returncode,0); self.assertEqual(self.active.resolve(),before)
     def test_python_syntax(self):
