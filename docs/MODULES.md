@@ -89,6 +89,19 @@ without its module. The registry now supplies all check mappings and install pat
 
 ## Configuration and compatibility
 
+Enable state is resolved once: explicit configuration overrides the registry
+default. The entrypoint assigns that effective `0`, `1`, or `auto` to the
+registered enable variable before loading modules, and reasserts the resolved
+value immediately before invoking a selected check. The existing `LMD_ENABLED`
+alias overrides `CHECK_LMD`; both variables receive the resolved LMD value.
+Modules should consume this value. Legacy `${CHECK_FOO:-0}` guards remain
+compatible because the entrypoint has already assigned the registry default.
+Do not rewrite another check's enable state during module loading or execution.
+
+Execution accounting proves invocation and catches execution errors; it cannot
+prove that arbitrary module code performs its intended work rather than returning
+zero. Modules must implement their registered contract and propagate failures.
+
 Unknown configuration keys, including `CHECK_DOES_NOT_EXIST=1`, produce
 ERROR / exit 2. Enable keys are accepted only through the registry, with one
 existing exception: `CHECK_DIRECTADMIN_WEBROOTS` is a boolean subcheck inside

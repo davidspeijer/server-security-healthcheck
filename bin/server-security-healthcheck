@@ -71,12 +71,25 @@ if hc_enabled "${NOTIFY_TELEGRAM:-0}" || [ "${1:-}" = --test-notification ]; the
 fi
 
 # Only registry entries are executable checks; unrelated files are never sourced.
-declare -A HC_REQUIRED HC_LOADED HC_EXECUTED
+declare -A HC_REQUIRED HC_LOADED HC_EXECUTED HC_EFFECTIVE
 for check_name in "${HC_REG_NAMES[@]}"; do
     [ "${HC_REG_KIND[$check_name]}" != helper ] || continue
     config_key="${HC_REG_CONFIG[$check_name]}"
-    value="${!config_key:-${HC_REG_DEFAULT[$check_name]}}"
-    [ "$check_name" != lmd ] || value="${LMD_ENABLED:-$value}"
+    value="${!config_key-${HC_REG_DEFAULT[$check_name]}}"
+    [ "$check_name" != lmd ] || value="${LMD_ENABLED-$value}"
+    [[ "$value" =~ ^(0|1|auto)$ ]] &&
+    { [ "$config_key" != CHECK_DISK ] || [[ "$value" =~ ^[01]$ ]]; } || {
+        hc_status ERROR "Invalid effective enable state: $config_key"
+        exit 2
+    }
+    HC_EFFECTIVE[$check_name]="$value"
+    # Modules share this shell. Publish defaults before loading so their guards
+    # consume the same value used for selection, including legacy fallbacks.
+    printf -v "$config_key" '%s' "$value" && [ "${!config_key-}" = "$value" ] &&
+    { [ "$check_name" != lmd ] || { printf -v LMD_ENABLED '%s' "$value" && [ "${LMD_ENABLED-}" = "$value" ]; }; } || {
+        hc_status ERROR "Cannot publish effective enable state: $check_name"
+        exit 2
+    }
     if [ "$(hc_mode "$value")" = off ]; then
         HC_DISABLED=$((HC_DISABLED + 1))
         [ "${1:-}" = --list-checks ] || continue
@@ -159,6 +172,15 @@ for check_name in "${HC_REG_NAMES[@]}"; do
         hc_status ERROR "Required check not registered or function from unexpected module: $check_name"
         continue
     fi
+    # Reassert the resolved state: module loading or an earlier check must not
+    # accidentally turn a selected check into a disabled guard/no-op.
+    config_key="${HC_REG_CONFIG[$check_name]}"; value="${HC_EFFECTIVE[$check_name]}"
+    # Bash 4.4 printf -v can report success for a readonly variable: read back.
+    printf -v "$config_key" '%s' "$value" && [ "${!config_key-}" = "$value" ] &&
+    { [ "$check_name" != lmd ] || { printf -v LMD_ENABLED '%s' "$value" && [ "${LMD_ENABLED-}" = "$value" ]; }; } || {
+        hc_status ERROR "Cannot restore effective enable state: $check_name"
+        continue
+    }
     HC_EXECUTED[$check_name]=1
     execution_failed=0
     set -E
