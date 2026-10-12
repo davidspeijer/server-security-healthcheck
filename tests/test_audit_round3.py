@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import re
 import time
 import unittest
 from unittest import mock
@@ -305,7 +306,7 @@ class InstallerTests(Base):
     def test_launcher(self):
         self.good()
         result=subprocess.run([str(self.dest/'usr/local/sbin/server-security-healthcheck'),'--version'],text=True,capture_output=True)
-        self.assertEqual(result.returncode,0,result.stderr); self.assertIn('v0.5.3',result.stdout)
+        self.assertEqual(result.returncode,0,result.stderr); self.assertEqual(result.stdout,'server-security-healthcheck v1.0.0\n')
     def test_stage_interrupted(self):
         self.good(); before=self.active.resolve(); result=self.install('health_data.py',interrupt=True); self.assertNotEqual(result.returncode,0); self.assertEqual(self.active.resolve(),before); self.assertIn('previous runtime retained',result.stderr)
     def test_unit_stage_failure(self):
@@ -329,7 +330,13 @@ class InstallerTests(Base):
         releases_before=sorted(p.name for p in before.parent.iterdir())
         entry=self.source/'bin/server-security-healthcheck'
         old_entry=(before/'bin/server-security-healthcheck').read_bytes()
-        entry.write_text(entry.read_text().replace('APP_VERSION="0.5.3"','APP_VERSION="0.5.3-interrupted"'))
+        candidate, replacements = re.subn(r'^APP_VERSION=.*$',
+                                          'APP_VERSION="fixture-interrupted"',
+                                          entry.read_text(), flags=re.MULTILINE)
+        self.assertEqual(replacements, 1)
+        self.assertNotEqual(candidate.encode(), old_entry)
+        self.assertIn('APP_VERSION="fixture-interrupted"', candidate)
+        entry.write_text(candidate)
         text=(ROOT/'install.sh').read_text()
         for prefix in ['/usr/local/','/etc/']: text=text.replace(prefix,str(self.dest)+prefix)
         text='\n'.join('ROOT_DIR='+Q(str(self.source)) if line.startswith('ROOT_DIR=') else line for line in text.splitlines())

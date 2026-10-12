@@ -1,6 +1,14 @@
 # Server Security Healthcheck
 
-Current version: **v0.5.3**.
+First official release candidate: **v1.0.0** (not yet tagged or published).
+Earlier 0.x versions were internal development milestones.
+
+From 1.0.0, the documented CLI options, exit codes, literal configuration format,
+check enable/default semantics, registry/custom-module contract, installer/upgrade
+behavior, notification behavior and runtime requirements form the supported public
+contract. Incompatible changes to these interfaces require a major version;
+compatible additions use minor versions and compatible fixes use patch versions.
+See [the changelog](CHANGELOG.md) for release notes and internal development history.
 
 Standalone, modular, read-only security healthcheck for Linux servers. It reports
 operational problems; it does not scan files for malware, remediate, restart
