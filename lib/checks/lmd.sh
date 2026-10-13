@@ -356,11 +356,10 @@ _lmd_check_webroots() {
             else
                 hc_status PASS "LMD realtime coverage: $((covered))/$((expected_count)) webroots monitored"
             fi
-            hc_detail "LMD coverage counts:
-       Expected: $((expected_count))
-       Configured: $((configured_count))
-       Missing: $missing_count
-       Stale: $stale_count"
+            hc_detail "LMD coverage expected: $((expected_count))"
+            hc_detail "LMD coverage configured: $((configured_count))"
+            hc_detail "LMD coverage missing: $missing_count"
+            hc_detail "LMD coverage stale: $stale_count"
             [ -z "$missing" ] || printf '       Missing paths:\n%s\n' "$(hc_present "$missing")"
             [ -z "$stale" ] || printf '       Stale/out-of-scope entries:\n%s\n' "$(hc_present "$stale")"
         fi
@@ -560,8 +559,18 @@ _lmd_session_retention_days() {
     local LMD_POLICY_ENV="${LMD_SYSCONFIG_FILE:-/etc/sysconfig/maldet}"
     [ -e "$LMD_POLICY_ENV" ] || LMD_POLICY_ENV="${LMD_DEFAULT_FILE:-/etc/default/maldet}"
     [ -f "$LMD_POLICY_MAIN" ] && [ -r "$LMD_POLICY_MAIN" ] || return 1
-    value="$(_lmd_effective_config_value cron_prune_days daily)"; status=$?
-    case "$status" in 0) ;; 1) value=21 ;; *) return 1 ;; esac
+    local sysconfig="${LMD_SYSCONFIG_FILE:-/etc/sysconfig/maldet}" default="${LMD_DEFAULT_FILE:-/etc/default/maldet}"
+    local lmd_cache_active=1 lmd_compat_status=0
+    local -A lmd_file_status=() lmd_key_status=() lmd_values=()
+    local -A compat_state=() compat_value=() compat_changed=()
+    _lmd_policy_snapshot || return 4
+    local policy_file
+    for policy_file in "$LMD_POLICY_MAIN" "$LMD_POLICY_ENV" "$LMD_POLICY_CRON"; do
+        if [ -e "$policy_file" ] && [ "${lmd_file_status[$policy_file]:-3}" = 3 ]; then return 3; fi
+    done
+    if [ -e "$LMD_POLICY_COMPAT" ] && [ "$lmd_compat_status" = 3 ]; then return 3; fi
+    if value="$(_lmd_effective_config_value cron_prune_days daily)"; then status=0; else status=$?; fi
+    case "$status" in 0) ;; 1) value=21 ;; 2|3) return 1 ;; *) return 4 ;; esac
     hc_uint "$value" || return 1
     printf '%s' "$value"
 }
@@ -592,10 +601,26 @@ _lmd_missing_session_expired() {
 # upstream trap_exit finalizes killed scans through the same report writer.
 _lmd_native_records() {
     local directory="$1" scratch="$2" expected="$3" now="$4"
-    local parse_started=$SECONDS
-    local line header id session started ended state meta value bad field retention_days
+    local parse_started=$SECONDS records_processed=0
+    local line header id session started ended state meta value bad field retention_days retention_status
     local -a lmd_fields row hdr
-    retention_days="$(_lmd_session_retention_days || true)"
+    if retention_days="$(_lmd_session_retention_days)"; then retention_status=0; else retention_status=$?; fi
+    if hc_budget_expired "$parse_started"; then
+        LMD_NATIVE_VALID=0
+        hc_status ERROR "LMD native parsing budget exceeded: time=$((SECONDS-parse_started))s limit=${SSHC_READ_SECONDS:-20}s; session metadata records=0 (retention policy resolution)"
+        return 1
+    fi
+    if [ "$retention_status" = 3 ]; then
+        LMD_NATIVE_VALID=0
+        hc_status ERROR 'LMD native retention policy input UNKNOWN: read/resource budget failure (configuration snapshot)'
+        return 1
+    fi
+    case "$retention_status" in
+        0|1) ;;
+        *) LMD_NATIVE_VALID=0
+           hc_status ERROR 'LMD native retention policy parser execution failed'
+           return 1 ;;
+    esac
     [ -f "$directory/session.index" ] && [ -r "$directory/session.index" ] || {
         LMD_NATIVE_VALID=0; hc_warn 'LMD native session.index unavailable'; return;
     }
@@ -605,8 +630,13 @@ _lmd_native_records() {
         *) LMD_NATIVE_VALID=0; hc_warn 'LMD native session.index header invalid; completion cannot be established'; return ;;
     esac
     while IFS= read -r line || [ -n "$line" ]; do
-        if hc_budget_expired "$parse_started"; then LMD_NATIVE_VALID=0; hc_status ERROR 'LMD native parsing budget exceeded'; return 1; fi
+        if hc_budget_expired "$parse_started"; then
+            LMD_NATIVE_VALID=0
+            hc_status ERROR "LMD native parsing budget exceeded: time=$((SECONDS-parse_started))s limit=${SSHC_READ_SECONDS:-20}s; session metadata records=$records_processed (includes retention policy resolution)"
+            return 1
+        fi
         [[ "$line" = \#* || -z "$line" ]] && continue
+        records_processed=$((records_processed + 1))
         _lmd_split_tabs "$line"; row=("${lmd_fields[@]}")
         if [[ ! "${row[0]}" =~ ^[0-9]{6}-[0-9]{4}\.[0-9]+$ ]] ||
             { [ "${#row[@]}" -ne 14 ] && [ "${#row[@]}" -ne 11 ] && [ "${#row[@]}" -ne 9 ]; }; then

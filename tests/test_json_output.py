@@ -37,7 +37,7 @@ class JsonTests(unittest.TestCase):
         self.assertEqual(set(data), {'schema_version','application','run','host','summary','checks','findings','truncated'})
         self.assertEqual(data['schema_version'], 1)
         self.assertEqual(data['application']['name'], 'server-security-healthcheck')
-        self.assertEqual(data['application']['version'], '1.1.0')
+        self.assertEqual(data['application']['version'], '1.1.1')
         self.assertEqual(data['host']['hostname'], 'fixture.example')
         for obj in [data['run'], self.check(data)]:
             for key in ['started_at','finished_at']:

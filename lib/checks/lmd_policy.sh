@@ -12,6 +12,9 @@ _lmd_trim() {
 # out of diagnostics. Missing, empty, dynamic and unreadable are distinct states.
 # Non-assignment shell statements make the file unknown rather than approximating
 # conditionals, includes or unset. Repeated unconditional assignments: last wins.
+# Status contract: 0=value, 1=no key, 2=unresolvable literal data,
+# 3=unavailable/resource failure, 4=unexpected parser execution failure.
+# Whole-file capture and compatibility computation never return no-key status 1.
 _lmd_config_get() {
     if [ "${lmd_cache_active:-0}" = 1 ] && [ "${lmd_file_status[$1]+set}" ]; then
         local entry="$1|$2" rc="${lmd_file_status[$1]}"
@@ -75,10 +78,12 @@ _lmd_config_stream() {
 _lmd_compat_load() {
     local name="$1" result rc
     [ "${compat_state[$name]+set}" ] && return 0
-    result="$(_lmd_config_get "$LMD_POLICY_MAIN" "$name")"; rc=$?
+    # Missing migration targets are expected, not an inherited ERR-trap failure.
+    if result="$(_lmd_config_get "$LMD_POLICY_MAIN" "$name")"; then rc=0; else rc=$?; fi
     case "$rc" in
         0|1) compat_state[$name]=known; compat_value[$name]="$result" ;;
-        *) compat_state[$name]=unknown; compat_value[$name]='' ;;
+        2|3) compat_state[$name]=unknown; compat_value[$name]='' ;;
+        *) return 4 ;;
     esac
 }
 
@@ -105,14 +110,14 @@ _lmd_compat_compute() {
         elif [ "$stage" = 2 ]; then
             [ "$line" = "fi" ] || return 2
             stage=0
-            _lmd_compat_load "$target"
-            _lmd_compat_load "$source"
+            _lmd_compat_load "$target" || return 4
+            _lmd_compat_load "$source" || return 4
             condition=yes
             if [ "$mode" = fallback ]; then
                 if [ "${compat_state[$target]}" = unknown ]; then condition=unknown
                 elif [ -n "${compat_value[$target]}" ]; then condition=no; fi
             elif [ "$mode" = depth ]; then
-                _lmd_compat_load "$guard"
+                _lmd_compat_load "$guard" || return 4
                 if [ "${compat_state[$guard]}" = unknown ]; then condition=unknown
                 elif [ "${compat_value[$guard]}" != 1 ]; then condition=no; fi
             fi
@@ -136,10 +141,14 @@ _lmd_compat_compute() {
             target=scan_workers source=scan_hex_workers mode=source stage=1
         elif [[ "$line" =~ $assignment ]]; then
             target="${BASH_REMATCH[2]}"
-            value="$(_lmd_config_stream "$target" <<< "$line")"; rc=$?
+            if value="$(_lmd_config_stream "$target" <<< "$line")"; then rc=0; else rc=$?; fi
             compat_changed[$target]=1
             compat_value[$target]="$value"
-            if [ "$rc" = 0 ]; then compat_state[$target]=known; else return 2; fi
+            case "$rc" in
+                0) compat_state[$target]=known ;;
+                2|3) return "$rc" ;;
+                *) return 4 ;;
+            esac
         else
             return 2
         fi
@@ -154,7 +163,8 @@ _lmd_compat_get() {
         rc="$lmd_compat_status"
     else
         local -A compat_state=() compat_value=() compat_changed=()
-        _lmd_compat_compute "$1"; rc=$?
+        if _lmd_compat_compute "$1"; then rc=0; else rc=$?; fi
+        case "$rc" in 0|2|3) ;; *) return 4 ;; esac
     fi
     [ "$rc" = 0 ] || return "$rc"
     [ "${compat_changed[$wanted]:-0}" = 1 ] || return 1
@@ -173,7 +183,7 @@ _lmd_policy_get() {
 _lmd_policy_compare() {
     local file="$1" key="$2" expected="$3" label="$4" optional="${5:-0}" value status
     [ "$expected" = ignore ] && return 0
-    value="$(_lmd_policy_get "$file" "$key")"; status=$?
+    if value="$(_lmd_policy_get "$file" "$key")"; then status=0; else status=$?; fi
     if [ "$status" -eq 1 ] && [ "$optional" = 1 ]; then return 0; fi
     case "$status" in
         1) hc_warn "LMD $label: $key missing in $file" ;;
@@ -190,6 +200,7 @@ _lmd_policy_compare() {
                 # values: those may contain credentials or terminal control data.
                 hc_warn "LMD $label: $key differs from expected policy ($file)"
             fi ;;
+        *) hc_status ERROR 'LMD policy lookup execution failed'; return 4 ;;
     esac
 }
 
@@ -210,11 +221,12 @@ _lmd_effective_config_value() {
     [ "$scope" != daily ] || files+=("$LMD_POLICY_CRON")
     for file in "${files[@]}"; do
         [ -e "$file" ] || continue
-        next="$(_lmd_policy_get "$file" "$key")"; status=$?
+        if next="$(_lmd_policy_get "$file" "$key")"; then status=0; else status=$?; fi
         case "$status" in
             0) value="$next" ;;
             1) ;;
-            *) return 2 ;;
+            2|3) return 2 ;;
+            *) return 4 ;;
         esac
     done
     [ -n "$value" ] || return 1
@@ -401,9 +413,13 @@ _lmd_check_monitor_config() {
         return
     fi
     if [ -z "$value" ]; then
-        value="$(_lmd_effective_config_value default_monitor_mode runtime)" || {
-            hc_warn 'LMD MONITOR_MODE and default_monitor_mode are missing/unreadable'; return;
-        }
+        local status
+        if value="$(_lmd_effective_config_value default_monitor_mode runtime)"; then status=0; else status=$?; fi
+        case "$status" in
+            0) ;;
+            1|2|3) hc_warn 'LMD MONITOR_MODE and default_monitor_mode are missing/unreadable'; return ;;
+            *) hc_status ERROR 'LMD monitor policy lookup execution failed'; return 4 ;;
+        esac
         hc_detail 'LMD monitor mode uses default_monitor_mode fallback'
     fi
     if [ "$value" = "$expected" ]; then hc_status PASS 'LMD effective MONITOR_MODE matches expected monitor target'
@@ -425,11 +441,12 @@ _lmd_check_retention() {
     # contexts so a daily override cannot silently shorten weekly scan history.
     for scope in runtime daily; do
         origin='configured'
-        value="$(_lmd_effective_config_value scan_meta_cleanup_age "$scope")"; status=$?
+        if value="$(_lmd_effective_config_value scan_meta_cleanup_age "$scope")"; then status=0; else status=$?; fi
         case "$status" in
             0) ;;
             1) value=24; origin='LMD 2.0.1 fallback (missing/empty setting)' ;;
-            *) hc_warn "LMD $scope scan_meta_cleanup_age UNKNOWN: configuration cannot be safely resolved"; continue ;;
+            2|3) hc_warn "LMD $scope scan_meta_cleanup_age UNKNOWN: configuration cannot be safely resolved"; continue ;;
+            *) hc_status ERROR 'LMD retention policy lookup execution failed'; return 4 ;;
         esac
         if ! hc_uint "$value"; then
             hc_warn "LMD $scope scan_meta_cleanup_age UNKNOWN: expected unsigned decimal hours or 0; minimum ${minimum}h"
@@ -441,6 +458,31 @@ _lmd_check_retention() {
             hc_status PASS "LMD $scope scan_meta_cleanup_age=${value}h meets minimum ${minimum}h (fullscan age ${max_age}h + margin ${margin}h)"
         fi
     done
+}
+
+# Caller owns invocation-local maps: capture each literal source once before
+# compatibility resolution, including the retention-only native adapter path.
+_lmd_policy_snapshot() {
+    local file value status
+    for file in "$LMD_POLICY_MAIN" "$sysconfig" "$default" "$LMD_POLICY_CRON"; do
+        [ ! "${lmd_file_status[$file]+set}" ] || continue
+        if [ -f "$file" ] && [ -r "$file" ]; then
+            # The file argument identifies the in-memory cache; no file is written.
+            # shellcheck disable=SC2094
+            if value="$(hc_data_parse bounded "$file" 2>/dev/null)"; then
+                if _lmd_config_stream '' "$file" <<< "$value"; then status=0; else status=$?; fi
+                # A whole-file parse has no missing-key result. Do not cache an
+                # unexpected rc=1 (or any other execution status) as absent data.
+                case "$status" in 0|2|3) ;; *) return 4 ;; esac
+            else status=3; fi
+        else
+            status=3
+        fi
+        lmd_file_status[$file]="$status"
+    done
+    if _lmd_compat_compute "$LMD_POLICY_COMPAT"; then lmd_compat_status=0; else lmd_compat_status=$?; fi
+    case "$lmd_compat_status" in 0|2|3) ;; *) return 4 ;; esac
+    return 0
 }
 
 _lmd_check_configuration() {
@@ -460,20 +502,10 @@ _lmd_check_configuration() {
     local lmd_cache_active=1 lmd_compat_status=0
     local -A lmd_file_status=() lmd_key_status=() lmd_values=()
     local -A compat_state=() compat_value=() compat_changed=()
-    for file in "$LMD_POLICY_MAIN" "$sysconfig" "$default" "$LMD_POLICY_CRON"; do
-        [ ! "${lmd_file_status[$file]+set}" ] || continue
-        if [ -f "$file" ] && [ -r "$file" ]; then
-            # The file argument identifies the in-memory cache; no file is written.
-            # shellcheck disable=SC2094
-            if value="$(hc_data_parse bounded "$file" 2>/dev/null)"; then
-                _lmd_config_stream '' "$file" <<< "$value"; status=$?
-            else status=3; fi
-        else
-            status=3
-        fi
-        lmd_file_status[$file]="$status"
-    done
-    _lmd_compat_compute "$LMD_POLICY_COMPAT"; lmd_compat_status=$?
+    if _lmd_policy_snapshot; then :; else
+        hc_status ERROR 'LMD policy snapshot execution failed'
+        return 4
+    fi
 
     _lmd_check_retention
     _lmd_policy_setting email_alert "${LMD_EXPECT_EMAIL_ALERT:-1}"
@@ -494,7 +526,7 @@ _lmd_check_configuration() {
     _lmd_policy_compare "$LMD_POLICY_CRON" autoupdate_version "${LMD_EXPECT_CRON_AUTOUPDATE_VERSION:-0}" 'daily program override'
 
     for key in scan_workers scan_hashtype cron_prune_days email_addr email_subj; do
-        value="$(_lmd_config_get "$LMD_POLICY_MAIN" "$key")"; status=$?
+        if value="$(_lmd_config_get "$LMD_POLICY_MAIN" "$key")"; then status=0; else status=$?; fi
         case "$status" in
             0)
                 case "$key" in
@@ -506,13 +538,19 @@ _lmd_check_configuration() {
                     if [ -n "$value" ]; then value=configured; else value=empty; fi
                 fi
                 hc_detail "LMD tuning $key: $value${expected:+ (preferred: $expected; not enforced)}" ;;
-            *) hc_detail "LMD tuning $key: unavailable or not a literal assignment (not enforced)" ;;
+            1|2|3) hc_detail "LMD tuning $key: unavailable or not a literal assignment (not enforced)" ;;
+            *) hc_status ERROR 'LMD tuning policy lookup execution failed'; return 4 ;;
         esac
     done
     _lmd_check_monitor_config "$sysconfig" "$default" "${LMD_EXPECT_MONITOR_MODE:-${LMD_WEBROOT_LIST:-${LMD_MONITOR_LIST:-$root/directadmin-webroots}}}"
     if _lmd_daily_bindings && _lmd_daily_contract "${LMD_DAILY_CRON_FILE:-/etc/cron.daily/maldet}"; then
         for key in autoupdate_version autoupdate_signatures; do
-            value="$(_lmd_effective_config_value "$key" daily)" || { hc_warn "LMD effective daily $key is unknown"; continue; }
+            if value="$(_lmd_effective_config_value "$key" daily)"; then status=0; else status=$?; fi
+            case "$status" in
+                0) ;;
+                1|2|3) hc_warn "LMD effective daily $key is unknown"; continue ;;
+                *) hc_status ERROR 'LMD daily policy lookup execution failed'; return 4 ;;
+            esac
             if [ "$key" = autoupdate_version ]; then expected="${LMD_EXPECT_CRON_AUTOUPDATE_VERSION:-0}"
             else expected="${LMD_EXPECT_CRON_AUTOUPDATE_SIGNATURES:-0}"; fi
             if [ "$expected" = ignore ]; then continue; fi
@@ -537,8 +575,7 @@ _lmd_check_configuration() {
             hc_status ERROR 'LMD daily custom.cron input UNKNOWN: read/resource limit failure'
         else
             local hook_status
-            grep -Eq '^[[:space:]]*[^#[:space:]]' <<< "$hook_contents" 2>/dev/null
-            hook_status=$?
+            if grep -Eq '^[[:space:]]*[^#[:space:]]' <<< "$hook_contents" 2>/dev/null; then hook_status=0; else hook_status=$?; fi
             case "$hook_status" in
                 0) hc_warn 'LMD daily custom.cron contains commands or is unreadable; additional behavior requires review' ;;
                 1) ;;

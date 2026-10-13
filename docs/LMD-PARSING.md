@@ -3,6 +3,9 @@
 The healthcheck reads LMD data; it never sources LMD shell/configuration files and
 never invokes maldet (even report commands can run initialization routines).
 
+See [the production budget investigation](LMD-PRODUCTION-BUDGET.md) for the
+retention-policy cache fix, unchanged limits, input inventory and measurements.
+
 ## Scanner reliability (2026-10-11)
 
 Before this change the healthcheck never read `clamscan_log`, scanner exit codes,

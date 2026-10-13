@@ -309,7 +309,7 @@ class InstallerTests(Base):
     def test_launcher(self):
         self.good()
         result=subprocess.run([str(self.dest/'usr/local/sbin/server-security-healthcheck'),'--version'],text=True,capture_output=True)
-        self.assertEqual(result.returncode,0,result.stderr); self.assertEqual(result.stdout,'server-security-healthcheck v1.1.0\n')
+        self.assertEqual(result.returncode,0,result.stderr); self.assertEqual(result.stdout,'server-security-healthcheck v1.1.1\n')
     def test_stage_interrupted(self):
         self.good(); before=self.active.resolve(); result=self.install('health_data.py',interrupt=True); self.assertNotEqual(result.returncode,0); self.assertEqual(self.active.resolve(),before); self.assertIn('previous runtime retained',result.stderr)
     def test_unit_stage_failure(self):

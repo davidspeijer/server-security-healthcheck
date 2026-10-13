@@ -1,8 +1,34 @@
 # Changelog
 
-## [1.1.0] - Unreleased
+## [1.1.1] - Unreleased
 
-Backward-compatible feature release candidate on the v1.0.0 public contract.
+Backward-compatible patch release on v1.1.0; no new public features.
+
+### Fixed
+
+- Reuse the invocation-local literal policy snapshot for native session retention
+  resolution. Large normal configuration/compatibility files no longer cause
+  repeated reads to consume the native parsing deadline before the first record.
+- Keep the existing 20-second deadline and fail-closed behavior; report elapsed
+  seconds, configured limit and processed session records on native deadline failure.
+- Handle expected missing policy keys and comment-only custom hooks explicitly,
+  avoiding false inherited ERR-trap execution failures while preserving errors
+  for unreadable or over-budget retention configuration.
+- Preserve ERROR and exit 2 for unexpected policy-parser and execution failures;
+  missing-key results are accepted only where the lookup contract allows them.
+- Present LMD coverage counts as four separate INFO findings in text, JSON and
+  notification summaries, avoiding literal backslash-newline presentation.
+
+### Performance
+
+- Reduce redundant policy reads from dozens of reads to one read per relevant
+  source during each policy resolution, using the invocation-local snapshot/cache.
+- Substantially reduce representative LMD processing time without increasing
+  parsing limits or discarding required history.
+
+## [1.1.0] - 2026-10-13
+
+Backward-compatible feature release on the v1.0.0 public contract.
 
 ### Added
 

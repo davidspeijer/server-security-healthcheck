@@ -317,10 +317,10 @@ pgrep() {{ return 0; }}
     def test_coverage_equal_normalizes_trailing_slash_and_duplicates(self):
         output = self.coverage('# comment\n{expected}/\n{expected}\n')
         self.assertIn('1/1 webroots monitored', output)
-        self.assertIn('Expected: 1', output)
-        self.assertIn('Configured: 1', output)
-        self.assertIn('Missing: 0', output)
-        self.assertIn('Stale: 0', output)
+        self.assertIn('LMD coverage expected: 1', output)
+        self.assertIn('LMD coverage configured: 1', output)
+        self.assertIn('LMD coverage missing: 0', output)
+        self.assertIn('LMD coverage stale: 0', output)
         self.assertNotIn('WARNING', output)
 
     def test_coverage_same_count_different_set(self):
@@ -448,7 +448,7 @@ CHECK_LMD=0
     def test_version(self):
         result = self.main('', ['--version'])
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, 'server-security-healthcheck v1.1.0\n')
+        self.assertEqual(result.stdout, 'server-security-healthcheck v1.1.1\n')
 
     def test_unknown_argument(self):
         self.assertEqual(self.main('', ['--unknown']).returncode, 2)
