@@ -3,7 +3,7 @@ set -u
 set -o pipefail
 
 APP_NAME="server-security-healthcheck"
-APP_VERSION="1.1.1"
+APP_VERSION="1.1.2"
 if [ "${1:-}" = --version ] && [ "$#" -eq 1 ]; then
     printf '%s v%s\n' "$APP_NAME" "$APP_VERSION"
     exit 0

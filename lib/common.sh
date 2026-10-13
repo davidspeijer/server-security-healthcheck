@@ -32,6 +32,20 @@ hc_present() {
     printf '%s' "$value"
 }
 
+# Plain reporter values need redaction but no escaping/subshell. Redaction's
+# fixed replacement cannot introduce controls. Other values retain the existing
+# stdout escape path; glob detection preserves the caller's BASH_REMATCH.
+_hc_present_value() {
+    local value="$1" LC_ALL=C
+    if [[ "$value" != *$'\n'* && "$value" != *$'\r'* &&
+          "$value" != *$'\t'* && "$value" != *[[:cntrl:]]* ]]; then
+        hc_redact "$value"
+        HC_PRESENT_ESCAPED_VALUE="$HC_PRESENT_VALUE"
+    else
+        HC_PRESENT_ESCAPED_VALUE="$(hc_present "$value")"
+    fi
+}
+
 hc_warn() {
     hc_status WARNING "$1"
 }
@@ -72,7 +86,7 @@ hc_presentation_prefix() {
 hc_detail() { hc_status INFO "$1"; }
 
 hc_status() {
-    local level="$1" message bytes LC_ALL=C
+    local level="$1" message bytes raw HC_PRESENT_ESCAPED_VALUE LC_ALL=C
     # Record outcome before any presentation omission.
     case "$level" in PASS|INFO|WARNING|CRITICAL|ERROR)
         HC_RESULT_COUNTS[$level]=$(( ${HC_RESULT_COUNTS[$level]} + 1 ));;
@@ -86,7 +100,10 @@ hc_status() {
     hc_presentation_prefix "$HC_PRESENT_VALUE"
     [ "$HC_PRESENT_TRUNCATED" = 0 ] || HC_RESULTS_TRUNCATED=1
     [ "${HC_JSON_FILE:-}" = "" ] || hc_json_finding "$level" "$HC_PRESENT_VALUE"
-    message="$(hc_present "$HC_PRESENT_VALUE")"
+    raw="$HC_PRESENT_VALUE"
+    _hc_present_value "$raw"
+    message="$HC_PRESENT_ESCAPED_VALUE"
+    HC_PRESENT_VALUE="$raw"
     bytes=$(( ${#level} + ${#message} + 1 ))
     if [ "$HC_RESULTS_MESSAGES" -ge "$HC_RESULTS_MAX_MESSAGES" ] ||
        [ "$((HC_RESULTS_BYTES + bytes))" -gt "$HC_RESULTS_MAX_BYTES" ]; then
@@ -490,19 +507,28 @@ hc_output_load() {
     set +E
     [ "$status" = 0 ] && [ "$failed" = 0 ] || { hc_status ERROR 'Output helper source failed'; return 1; }
     hc_output_contract "$root" || return 1
-    python3 - "$root/checks/output.py" <<'PY_CONTRACT'
-import ast, sys
+    # Keep API preflight and self-test, but run both in one interpreter on the
+    # same parsed source. Preserve the helper's normal script/import context.
+    response="$(python3 - "$root/checks/output.py" <<'PY_CONTRACT'
+import ast, builtins, importlib.machinery, os, sys, types
 with open(sys.argv[1], 'rb') as stream:
     tree = ast.parse(stream.read(), filename=sys.argv[1])
 required = {'clock', 'duration', 'render', 'verify', 'validate', 'main'}
 assert required.issubset({n.name for n in tree.body if isinstance(n, ast.FunctionDef)}), 'Incomplete Python output helper'
+path = sys.argv[1]
+sys.argv = [path, 'self-test']
+sys.path[0] = os.path.dirname(path)
+module = types.ModuleType('__main__')
+module.__dict__.update(__file__=path, __package__=None, __spec__=None,
+                       __cached__=None, __builtins__=builtins,
+                       __loader__=importlib.machinery.SourceFileLoader('__main__', path))
+sys.modules['__main__'] = module
+exec(compile(tree, path, 'exec'), module.__dict__)
 PY_CONTRACT
-    status=$?
-    [ "$status" = 0 ] || { hc_status ERROR 'Python output helper contract failed'; return 1; }
-    response="$(python3 "$root/checks/output.py" self-test)"
+    )"
     status=$?
     [ "$status" = 0 ] && [ "$response" = SSHC_JSON_SCHEMA_1 ] || {
-        hc_status ERROR 'Python output helper self-test failed'; return 1;
+        hc_status ERROR 'Python output helper contract/self-test failed'; return 1;
     }
 }
 

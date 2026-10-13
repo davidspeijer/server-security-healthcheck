@@ -1,6 +1,18 @@
 # Changelog
 
-## [1.1.1] - Unreleased
+## [1.1.2] - Unreleased
+
+Backward-compatible internal performance improvements on v1.1.1.
+
+### Performance
+
+- Render retained findings in the reporting shell and skip unnecessary control
+  escaping for ordinary text, reducing work and subshell starts during large runs.
+- Combine JSON helper API validation and self-test in one Python invocation using
+  the same verified source, reducing JSON startup overhead without removing either
+  validation or the independent final output verification.
+
+## [1.1.1] - 2026-10-13
 
 Backward-compatible patch release on v1.1.0; no new public features.
 

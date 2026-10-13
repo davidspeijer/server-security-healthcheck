@@ -1,6 +1,6 @@
 # Server Security Healthcheck
 
-Current release candidate: **v1.1.1** (not yet tagged or published); v1.1.0 is tagged.
+Current release candidate: **v1.1.2** (not yet tagged or published); v1.1.1 is tagged.
 The first stable public contract baseline is v1.0.0.
 Earlier 0.x versions were internal development milestones.
 
