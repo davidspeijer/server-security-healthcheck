@@ -180,7 +180,10 @@ class PresentationTests(Base):
         result=self.shell('hc_load_config '+Q(str(path)))
         self.assertEqual(result.returncode,1); self.assertIn('ERROR Configuration input UNKNOWN',result.stdout); self.assertNotIn('CRITICAL fake',result.stdout)
     def test_unicode(self): self.assertIn('é🙂中文',self.present('é🙂中文'))
-    def test_long(self): self.assertEqual(self.present('x'*50000).count('x'),50000)
+    def test_long(self):
+        result=self.shell('hc_status CRITICAL '+Q('x'*50000)+'; printf "critical=%s truncated=%s" "$HC_CRITICAL_COUNT" "$HC_RESULTS_TRUNCATED"')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stdout,'  CRITICAL '+'x'*4096+'\ncritical=1 truncated=1')
     def test_signature(self): self.assertEqual(len(self.present('signature evil\nfake').splitlines()),1)
     def test_path(self): self.assertIn('/home/\\x01bad',self.present('/home/\x01bad'))
     def test_del(self): self.assertIn('\\x7f',self.present('\x7f'))
@@ -306,7 +309,7 @@ class InstallerTests(Base):
     def test_launcher(self):
         self.good()
         result=subprocess.run([str(self.dest/'usr/local/sbin/server-security-healthcheck'),'--version'],text=True,capture_output=True)
-        self.assertEqual(result.returncode,0,result.stderr); self.assertEqual(result.stdout,'server-security-healthcheck v1.0.0\n')
+        self.assertEqual(result.returncode,0,result.stderr); self.assertEqual(result.stdout,'server-security-healthcheck v1.1.0\n')
     def test_stage_interrupted(self):
         self.good(); before=self.active.resolve(); result=self.install('health_data.py',interrupt=True); self.assertNotEqual(result.returncode,0); self.assertEqual(self.active.resolve(),before); self.assertIn('previous runtime retained',result.stderr)
     def test_unit_stage_failure(self):

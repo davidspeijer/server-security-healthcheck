@@ -91,6 +91,7 @@ for file in "$STAGE/launcher" "$STAGE/bin/server-security-healthcheck"; do bash 
 (
     source "$STAGE/common.sh"
     hc_registry_load
+    hc_output_load "$STAGE"
     HC_REGISTERED_CHECKS=()
     for name in "${HC_REG_NAMES[@]}"; do hc_registry_module_load "$name" "$STAGE"; done
     expected_manifest="$(hc_runtime_manifest "$STAGE")"
@@ -106,12 +107,13 @@ for file in "$STAGE/launcher" "$STAGE/bin/server-security-healthcheck"; do bash 
             echo "Staged function provenance mismatch: $name" >&2; exit 1;
         }
     done
+    hc_output_contract "$STAGE"
     [ "$HC_ERRORS" -eq 0 ]
 )
 python3 - "$STAGE" <<'PY_VALIDATE'
 import ast, os, sys
 root = sys.argv[1]
-for name in ('bounded_input.py', 'health_data.py', 'lmd_scanner.py'):
+for name in ('bounded_input.py', 'health_data.py', 'lmd_scanner.py', 'output.py'):
     with open(os.path.join(root, 'checks', name), encoding='utf-8') as stream:
         ast.parse(stream.read(), filename=name)
 PY_VALIDATE

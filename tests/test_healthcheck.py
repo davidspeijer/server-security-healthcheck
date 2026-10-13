@@ -448,7 +448,7 @@ CHECK_LMD=0
     def test_version(self):
         result = self.main('', ['--version'])
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, 'server-security-healthcheck v1.0.0\n')
+        self.assertEqual(result.stdout, 'server-security-healthcheck v1.1.0\n')
 
     def test_unknown_argument(self):
         self.assertEqual(self.main('', ['--unknown']).returncode, 2)

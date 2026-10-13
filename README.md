@@ -1,6 +1,7 @@
 # Server Security Healthcheck
 
-First official release candidate: **v1.0.0** (not yet tagged or published).
+Current release candidate: **v1.1.0** (not yet tagged or published).
+The first stable public contract baseline is v1.0.0.
 Earlier 0.x versions were internal development milestones.
 
 From 1.0.0, the documented CLI options, exit codes, literal configuration format,
@@ -71,6 +72,14 @@ Uninstall disables/removes this project's timer and program files and reloads
 systemd. **All configuration under `/etc/server-security-healthcheck/` remains.**
 These administrative installation/removal operations are separate from the
 read-only healthcheck.
+
+## Machine-readable output
+
+`server-security-healthcheck --json` emits a schema-versioned JSON document with
+per-check status, monotonic duration, findings and a full-run summary. It changes
+stdout presentation only; notifications and exit codes 0/1/2 retain their normal
+behavior. Use it as a standalone option. See [JSON output](docs/JSON-OUTPUT.md)
+for the schema, status mapping, bounds, timing and error behavior.
 
 ## Usage, timer and exit status
 

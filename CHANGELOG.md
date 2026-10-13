@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.1.0] - Unreleased
+
+Backward-compatible feature release candidate on the v1.0.0 public contract.
+
+### Added
+
+- Standalone `--json` output with schema version 1, application/host metadata,
+  per-check status and findings, complete severity counters and run exit status.
+- Monotonic run/check timing with ISO 8601 timestamps and integer milliseconds;
+  disabled and unstarted checks have explicit status/timing semantics.
+- Bounded, secret-aware result journaling and Python stdlib JSON encoding;
+  truncation is explicit and does not hide severity or change counters.
+
+### Changed
+
+- Central result reporters optionally journal raw findings while retaining text
+  and notification aggregation. Normal text output and exit codes remain intact.
+- CLI options are standalone; combinations are explicitly rejected. `--json`
+  changes stdout format only and retains normal notification behavior.
+- Install and validate the optional JSON/timing helpers through a shared functional
+  contract, manifest and Python self-test. Check complete journal writes, render
+  privately and publish only after successful verification and cleanup.
+- Enforce total journal/record and registry metadata bounds, locale-independent
+  Unicode truncation, and registry ordering with helper failures at run level.
+  Timing/journal/rendering failures produce execution exit 2.
+- Redact known Telegram credentials before all central presentation storage and
+  output; bound shared result buffers and notification summary construction,
+  retaining full severity counters and explicit truncation in every mode.
+
+### Documentation
+
+- Document schema, statuses, timing boundaries, output limits, redaction, CLI
+  combinations and early failure behavior in `docs/JSON-OUTPUT.md`.
+- Extend README usage and architecture with the optional result journal.
+
+
 ## [1.0.0] - 2026-10-12
 
 First official release candidate; not yet tagged or published. Earlier 0.x

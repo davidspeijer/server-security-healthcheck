@@ -4,3 +4,5 @@ checks/lmd_scanner.py
 checks/health_data.py
 checks/bounded_input.py
 notify/telegram.sh
+output.sh
+checks/output.py

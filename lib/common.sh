@@ -4,12 +4,19 @@ HC_WARNINGS=()
 HC_DETAILS=()
 HC_ERRORS=0
 HC_ERROR_MESSAGES=()
+HC_WARNING_COUNT=0 HC_CRITICAL_COUNT=0
+HC_RESULTS_MESSAGES=0 HC_RESULTS_BYTES=0 HC_RESULTS_TRUNCATED=0
+declare -A HC_RESULT_COUNTS=([PASS]=0 [INFO]=0 [WARNING]=0 [CRITICAL]=0 [ERROR]=0)
+# Shared retained presentation budget, independent of complete severity counters.
+HC_RESULTS_MAX_MESSAGES=1000 HC_RESULTS_MAX_BYTES=3932160
 HC_NOT_APPLICABLE=0
 HC_DISCOVERY_FAILED=0
 
 # Escape values only at presentation boundaries; classification keeps raw input.
 hc_present() {
-    local value="$1" char escaped octal i
+    local value char escaped octal i
+    hc_redact "$1"
+    value="$HC_PRESENT_VALUE"
     value="${value//$'\n'/\\n}"
     value="${value//$'\r'/\\r}"
     value="${value//$'\t'/\\t}"
@@ -29,24 +36,81 @@ hc_warn() {
     hc_status WARNING "$1"
 }
 
-hc_detail() {
-    local message
-    message="$(hc_present "$1")"
-    HC_DETAILS+=("$message")
-    printf '  INFO %s\n' "$message"
+# Raw input belongs to immediate check logic. Only redacted presentation leaves
+# this function. Longest known secret first prevents overlapping partial leaks.
+hc_redact() {
+    local value="$1" first="${TELEGRAM_BOT_TOKEN:-}" second="${TELEGRAM_CHAT_ID:-}" swap
+    local LC_ALL=C
+    if [ "${#second}" -gt "${#first}" ]; then swap="$first"; first="$second"; second="$swap"; fi
+    [ -z "$first" ] || value="${value//"$first"/[REDACTED]}"
+    [ -z "$second" ] || value="${value//"$second"/[REDACTED]}"
+    HC_PRESENT_VALUE="$value"
+    return 0
 }
 
+# Bound bytes without splitting a valid UTF-8 sequence, under every locale.
+hc_presentation_prefix() {
+    local LC_ALL=C value="$1" limit="${2:-4096}" index byte width available
+    HC_PRESENT_VALUE="$value" HC_PRESENT_TRUNCATED=0
+    [ "${#value}" -gt "$limit" ] || return 0
+    HC_PRESENT_TRUNCATED=1
+    value="${value:0:$limit}"; index=$((limit - 1))
+    while [ "$index" -ge "$((limit - 4))" ]; do
+        printf -v byte '%d' "'${value:$index:1}"
+        [ "$byte" -ge 128 ] && [ "$byte" -le 191 ] || break
+        index=$((index - 1))
+    done
+    width=1
+    if [ "$byte" -ge 240 ] && [ "$byte" -le 244 ]; then width=4
+    elif [ "$byte" -ge 224 ] && [ "$byte" -le 239 ]; then width=3
+    elif [ "$byte" -ge 194 ] && [ "$byte" -le 223 ]; then width=2; fi
+    available=$((limit - index))
+    [ "$width" -le "$available" ] || value="${value:0:$index}"
+    HC_PRESENT_VALUE="$value"
+}
+
+hc_detail() { hc_status INFO "$1"; }
+
 hc_status() {
-    local level="$1" message
-    message="$(hc_present "$2")"
+    local level="$1" message bytes LC_ALL=C
+    # Record outcome before any presentation omission.
+    case "$level" in PASS|INFO|WARNING|CRITICAL|ERROR)
+        HC_RESULT_COUNTS[$level]=$(( ${HC_RESULT_COUNTS[$level]} + 1 ));;
+    esac
+    case "$level" in
+        WARNING) HC_WARNING_COUNT=$((HC_WARNING_COUNT + 1));;
+        CRITICAL) HC_CRITICAL_COUNT=$((HC_CRITICAL_COUNT + 1));;
+        ERROR) HC_ERRORS=$((HC_ERRORS + 1));;
+    esac
+    hc_redact "$2"
+    hc_presentation_prefix "$HC_PRESENT_VALUE"
+    [ "$HC_PRESENT_TRUNCATED" = 0 ] || HC_RESULTS_TRUNCATED=1
+    [ "${HC_JSON_FILE:-}" = "" ] || hc_json_finding "$level" "$HC_PRESENT_VALUE"
+    message="$(hc_present "$HC_PRESENT_VALUE")"
+    bytes=$(( ${#level} + ${#message} + 1 ))
+    if [ "$HC_RESULTS_MESSAGES" -ge "$HC_RESULTS_MAX_MESSAGES" ] ||
+       [ "$((HC_RESULTS_BYTES + bytes))" -gt "$HC_RESULTS_MAX_BYTES" ]; then
+        HC_RESULTS_TRUNCATED=1
+        return 0
+    fi
+    HC_RESULTS_MESSAGES=$((HC_RESULTS_MESSAGES + 1))
+    HC_RESULTS_BYTES=$((HC_RESULTS_BYTES + bytes))
     printf '  %s %s\n' "$level" "$message"
     case "$level" in
-        WARNING|CRITICAL) HC_WARNINGS+=("$level $message") ;;
-        ERROR)
-            HC_ERRORS=$((HC_ERRORS + 1))
-            HC_ERROR_MESSAGES+=("$level $message")
-            ;;
+        INFO) HC_DETAILS+=("$message");;
+        WARNING|CRITICAL) HC_WARNINGS+=("$level $message");;
+        ERROR) HC_ERROR_MESSAGES+=("$level $message");;
     esac
+    return 0
+}
+
+# Summary construction never joins the entire retained result set. Reserve space
+# for a final truncation notice and full critical counter.
+hc_summary_append() {
+    hc_presentation_prefix "$message$1" 16128
+    message="$HC_PRESENT_VALUE"
+    [ "$HC_PRESENT_TRUNCATED" = 0 ] || HC_RESULTS_TRUNCATED=1
+    return 0
 }
 
 # Bound shell processing of already validated snapshots, without spawning a clock.
@@ -296,7 +360,7 @@ declare -A HC_REG_MODULE=() HC_REG_FUNCTION=() HC_REG_KEY=() HC_REG_DEFAULT=() H
 HC_REGISTRY_READY=0
 hc_registry_load() {
     [ "$HC_REGISTRY_READY" = 0 ] || return 0
-    local contents line name module function key default kind dependency extra
+    local LC_ALL=C contents line name module function key default kind dependency extra
     local -A modules=() functions=()
     contents="$(hc_data_parse bounded "$HC_REGISTRY_ROOT/checks.registry")" || {
         hc_status ERROR 'Check registry missing or unreadable'; return 1;
@@ -308,6 +372,8 @@ hc_registry_load() {
         if [[ ! "$line" =~ ^[^\|]+\|[^\|]+\|[^\|]+\|[^\|]+\|[^\|]+\|[^\|]+\|[^\|]+$ ]] ||
            [[ ! "$name" =~ ^[a-z][a-z0-9_]*$ || ! "$module" =~ ^checks/[a-z][a-z0-9_]*\.sh$ ||
               ! "$function" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ || ! "$kind" =~ ^(builtin|custom|helper)$ ]] ||
+           [ "${#name}" -gt 128 ] || [ "${#module}" -gt 255 ] || [ "${#function}" -gt 128 ] ||
+           [ "${#key}" -gt 128 ] || [ "${#dependency}" -gt 128 ] ||
            [ -n "${HC_REG_MODULE[$name]:-}" ] || [ -n "${modules[$module]:-}" ] || [ -n "${functions[$function]:-}" ]; then
             hc_status ERROR "Invalid or duplicate check registry entry: $line"; return 1
         fi
@@ -364,7 +430,7 @@ hc_runtime_manifest() {
     local -A owned=()
     contents="$(hc_data_parse bounded "$root/runtime.manifest")" || { hc_status ERROR 'Runtime manifest unavailable'; return 1; }
     while IFS= read -r relative; do
-        [[ "$relative" =~ ^(common\.sh|checks\.registry|checks/[a-z_]+\.py|notify/[a-z_]+\.sh)$ ]] &&
+        [[ "$relative" =~ ^(common\.sh|output\.sh|checks\.registry|checks/[a-z_]+\.py|notify/[a-z_]+\.sh)$ ]] &&
         [ -z "${owned[$relative]:-}" ] || { hc_status ERROR 'Invalid or duplicated runtime manifest'; return 1; }
         owned[$relative]=1
         printf '%s\n' "$relative"
@@ -373,4 +439,77 @@ hc_runtime_manifest() {
         hc_status ERROR 'Runtime manifest lacks common/registry'; return 1;
     }
     for name in "${HC_REG_NAMES[@]}"; do printf '%s\n' "${HC_REG_MODULE[$name]}"; done
+}
+
+# Output helpers share one functional contract between staging and JSON startup.
+HC_OUTPUT_FUNCTIONS=(hc_json_init hc_json_record hc_json_utf8_prefix hc_json_finding hc_json_clock hc_json_finish)
+hc_output_contract() {
+    local root="$1" function
+    for function in "${HC_OUTPUT_FUNCTIONS[@]}"; do
+        hc_function_from "$function" "$root/output.sh" || {
+            if [ "${2:-}" = quiet ]; then
+                printf '%s\n' "ERROR output helper function missing or unexpected provenance: $function" >&2
+            else hc_status ERROR "Output helper function missing or unexpected provenance: $function"; fi
+            return 1;
+        }
+    done
+}
+hc_output_load() {
+    local root="$1" function status failed=0 response
+    for function in output.sh checks/output.py; do
+        [ -f "$root/$function" ] && [ -r "$root/$function" ] || {
+            hc_status ERROR "Output helper missing or unreadable: $function"; return 1;
+        }
+    done
+    bash -n "$root/output.sh" || { hc_status ERROR 'Output helper syntax failed'; return 1; }
+    for function in "${HC_OUTPUT_FUNCTIONS[@]}"; do unset -f "$function"; done
+    # Validate source completion in a child first: exit/errexit/nounset cannot
+    # bypass the parent's explicit ERROR/2 bootstrap boundary.
+    response="$(
+        HC_JSON_FILE=''
+        failed=0
+        set -E
+        trap 'failed=1' ERR
+        source "$root/output.sh"
+        status=$?
+        trap - ERR
+        set +E
+        [ "$status" = 0 ] && [ "$failed" = 0 ] || exit 1
+        hc_output_contract "$root" quiet || exit 1
+        printf '%s' SSHC_OUTPUT_SOURCE_COMPLETE
+    )"
+    status=$?
+    [ "$status" = 0 ] && [ "$response" = SSHC_OUTPUT_SOURCE_COMPLETE ] || {
+        hc_status ERROR 'Output helper source/contract validation failed'; return 1;
+    }
+    set -E
+    trap 'failed=1' ERR
+    source "$root/output.sh"
+    status=$?
+    trap - ERR
+    set +E
+    [ "$status" = 0 ] && [ "$failed" = 0 ] || { hc_status ERROR 'Output helper source failed'; return 1; }
+    hc_output_contract "$root" || return 1
+    python3 - "$root/checks/output.py" <<'PY_CONTRACT'
+import ast, sys
+with open(sys.argv[1], 'rb') as stream:
+    tree = ast.parse(stream.read(), filename=sys.argv[1])
+required = {'clock', 'duration', 'render', 'verify', 'validate', 'main'}
+assert required.issubset({n.name for n in tree.body if isinstance(n, ast.FunctionDef)}), 'Incomplete Python output helper'
+PY_CONTRACT
+    status=$?
+    [ "$status" = 0 ] || { hc_status ERROR 'Python output helper contract failed'; return 1; }
+    response="$(python3 "$root/checks/output.py" self-test)"
+    status=$?
+    [ "$status" = 0 ] && [ "$response" = SSHC_JSON_SCHEMA_1 ] || {
+        hc_status ERROR 'Python output helper self-test failed'; return 1;
+    }
+}
+
+hc_output_runtime_guard() {
+    hc_output_contract "$LIB_DIR" quiet && return 0
+    trap - EXIT
+    rm -f -- "$HC_JSON_FILE" "$HC_JSON_RENDERED"
+    rmdir -- "$HC_JSON_DIR"
+    exit 2
 }

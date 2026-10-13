@@ -164,3 +164,37 @@ These validation boundaries reject missing required checks, malformed registries
 unknown enable keys, unexpected function origins and broken selected backends.
 They do not make arbitrary trusted module code safe or prove all component
 behavior. The runtime never grants automatic execution to wildcard module files.
+
+## Optional JSON result journal
+
+With `--json`, the entrypoint reserves stdout, loads common code, validates the
+shared shell/Python output-helper contract, and initializes `lib/output.sh` with
+a private bounded journal before configuration loading. `hc_status` and
+`hc_detail` first produce redacted, byte-bounded presentation findings for both
+the journal and their text/notification aggregation. Raw values remain in check
+classification logic; they are not retained in the presentation arrays.
+Registry selection, module loading and invocation boundaries attach check IDs;
+Python `checks/output.py` supplies monotonic samples and renders schema 1 privately
+on exit.
+The journal is an additional presentation model, not a replacement security
+aggregator. JSON stdout is reserved through a separate descriptor; direct text
+presentation is discarded. Normal text runs do not load the optional output layer.
+Notifications use bounded redacted severity/context arrays. Complete severity
+counters are independent of retained messages. Central presentation shares 1,000
+messages and 3.75 MiB after escaping, with safe 4,096-byte UTF-8 message prefixes.
+The summary is built incrementally within 16 KiB, including its truncation notice;
+Telegram retains its additional transport limit. Shared truncation state reaches
+text, notifications and JSON. Literal configured Telegram token/chat values are
+redacted longest-first at central presentation boundaries. Direct custom output
+and unknown credentials remain the responsibility of trusted module code.
+Timing/journal or
+renderer failure forces exit 2. All final writes are checked before rendering;
+renderer success, schema/exitcode verification and cleanup precede publication.
+A failed renderer's partial or complete output never reaches stdout. The journal
+has a 4 MiB append budget with a structural reserve, 8 KiB record limits and
+bounded registry metadata. Messages are truncated to 1,024 Unicode codepoints.
+Helper setup errors remain top-level findings; real checks retain registry order.
+The installer owns the helpers through the shared manifest and applies the same
+functional contract and Python self-test before activation. See
+[JSON-OUTPUT.md](JSON-OUTPUT.md) for limits,
+fallbacks, schema and the distinction between invocation and semantic success.

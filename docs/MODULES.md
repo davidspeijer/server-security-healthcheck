@@ -33,7 +33,9 @@ without its module. The registry now supplies all check mappings and install pat
 
    Fields are `name|module|function|enable key|default|kind|dependency`.
    Module paths are relative to `lib`, restricted to `checks/<name>.sh`.
-   Names, modules, functions and enable keys must be unique. Kinds are `builtin`,
+   Names, modules, functions and enable keys must be unique. Registry names,
+   function names, enable keys and dependency names are limited to 128 ASCII
+   bytes; relative module paths to 255 ASCII bytes. Kinds are `builtin`,
    `custom`, or `helper`. Check defaults are `0`, `1`, or `auto`. Use `-` for
    no dependency. A dependency names an earlier `helper` entry; helpers have
    `-` for their enable key, default and dependency. The LMD policy module is
@@ -155,3 +157,20 @@ Use `hc_status PASS` for verified success, `hc_detail` for INFO, `hc_warn` for
 WARNING, `hc_status CRITICAL` for urgent findings, and `hc_status ERROR` when
 execution is unreliable. WARNING and CRITICAL produce exit 1; ERROR produces
 exit 2. Do not hide failed discovery or commands behind empty healthy results.
+
+Classify raw evidence before calling the reporter. Central reporters redact
+configured Telegram bot token/chat values literally (longest first) before
+storing or presenting messages. Custom modules may pass those known values to
+reporters; direct `echo`, stderr writes and shell tracing are still the module's
+responsibility. Unknown secret values are not automatically recognized.
+
+Presentation retains at most 1,000 messages and 3.75 MiB across the shared
+warning/error/detail buffers, counting escaped message bytes plus severity and
+one separator. Each message uses a safe 4,096-byte UTF-8 prefix; JSON additionally
+limits displayed messages to 1,024 Unicode codepoints. Classification and full
+severity counters survive omitted messages. Do not infer severity from array
+lengths: use `HC_RESULT_COUNTS`, `HC_WARNING_COUNT`, `HC_CRITICAL_COUNT` and
+`HC_ERRORS`. `HC_RESULTS_TRUNCATED` signals presentation loss in every mode.
+Notification summary construction is incremental and limited to 16 KiB including
+the notice, before the existing Telegram transport limit. These are retained-data
+bounds, not absolute process RSS limits or a sandbox for trusted modules.

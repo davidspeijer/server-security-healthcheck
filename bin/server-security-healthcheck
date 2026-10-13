@@ -3,8 +3,8 @@ set -u
 set -o pipefail
 
 APP_NAME="server-security-healthcheck"
-APP_VERSION="1.0.0"
-if [ "${1:-}" = --version ]; then
+APP_VERSION="1.1.0"
+if [ "${1:-}" = --version ] && [ "$#" -eq 1 ]; then
     printf '%s v%s\n' "$APP_NAME" "$APP_VERSION"
     exit 0
 fi
@@ -17,9 +17,7 @@ LIB_DIR="${SSHC_LIB_DIR:-/usr/local/lib/server-security-healthcheck}"
 MAIN_CONFIG="${CONFIG_DIR}/healthcheck.conf"
 TELEGRAM_CONFIG="${CONFIG_DIR}/telegram.conf"
 LIB_DIR="$(cd -P -- "$LIB_DIR" 2>/dev/null && pwd)" || { echo 'ERROR runtime directory unavailable' >&2; exit 2; }
-CHECK_DIR="${LIB_DIR}/checks"
-NOTIFY_DIR="${LIB_DIR}/notify"
-
+if [ "${1:-}" = --json ]; then exec 3>&1 1>/dev/null; fi
 [ -f "${LIB_DIR}/common.sh" ] && [ -r "${LIB_DIR}/common.sh" ] || {
     echo "ERROR missing ${LIB_DIR}/common.sh" >&2
     exit 2
@@ -30,6 +28,24 @@ if ! bash -n "${LIB_DIR}/common.sh" || ! source "${LIB_DIR}/common.sh"; then
     echo "ERROR common module could not be loaded: ${LIB_DIR}/common.sh" >&2
     exit 2
 fi
+
+if [ "${1:-}" = --json ]; then
+    HC_JSON_HELPER="$LIB_DIR/checks/output.py"
+    hc_output_load "$LIB_DIR"
+    output_status=$?
+    [ "$output_status" = 0 ] || { echo 'ERROR JSON helper contract failed' >&2; exit 2; }
+    hc_json_init || { echo 'ERROR JSON scratch initialization failed' >&2; exit 2; }
+    trap hc_json_finish EXIT
+    trap 'exit 2' HUP INT TERM
+    hc_json_clock run-start ''
+    [ "$#" -eq 1 ] || { echo 'ERROR --json cannot be combined with other options' >&2; exit 2; }
+    set --
+else
+    [ "$#" -le 1 ] || { echo 'ERROR CLI options cannot be combined' >&2; exit 2; }
+fi
+CHECK_DIR="${LIB_DIR}/checks"
+NOTIFY_DIR="${LIB_DIR}/notify"
+
 
 [ -r "$MAIN_CONFIG" ] || {
     hc_log "ERROR missing config: $MAIN_CONFIG"
@@ -82,6 +98,7 @@ for check_name in "${HC_REG_NAMES[@]}"; do
         hc_status ERROR "Invalid effective enable state: $config_key"
         exit 2
     }
+    [ "${HC_JSON_FILE:-}" = "" ] || hc_json_record check "$check_name" '' ''
     HC_EFFECTIVE[$check_name]="$value"
     # Modules share this shell. Publish defaults before loading so their guards
     # consume the same value used for selection, including legacy fallbacks.
@@ -91,6 +108,7 @@ for check_name in "${HC_REG_NAMES[@]}"; do
         exit 2
     }
     if [ "$(hc_mode "$value")" = off ]; then
+        [ "${HC_JSON_FILE:-}" = "" ] || hc_json_record state "$check_name" skipped ''
         HC_DISABLED=$((HC_DISABLED + 1))
         [ "${1:-}" = --list-checks ] || continue
     fi
@@ -114,11 +132,16 @@ fi
 for check_name in "${HC_REG_NAMES[@]}"; do
     [ "${HC_REQUIRED[$check_name]:-0}" = 1 ] || continue
     module="${LIB_DIR}/${HC_REG_MODULE[$check_name]}"
+    if [ "${HC_JSON_FILE:-}" != "" ]; then
+        HC_JSON_CURRENT="$check_name"
+        [ "${HC_REG_KIND[$check_name]}" != helper ] || HC_JSON_CURRENT=''
+    fi
     hc_registry_module_load "$check_name" "$LIB_DIR"
     module_status=$?
     [ "$module_status" != 0 ] || HC_LOADED[$check_name]=1
 done
 
+[ "${HC_JSON_FILE:-}" = "" ] || { HC_JSON_CURRENT=''; hc_output_runtime_guard; }
 if [ "$HC_NOTIFY_READY" = 1 ] &&
    { ! hc_function_from notify_telegram "${NOTIFY_DIR}/telegram.sh" || ! hc_function_from notify_test "${NOTIFY_DIR}/telegram.sh"; }; then
     hc_status ERROR 'Notification backend function missing or from unexpected module'
@@ -147,6 +170,7 @@ case "${1:-}" in
         cat <<'EOF'
 Usage:
   server-security-healthcheck
+  server-security-healthcheck --json
   server-security-healthcheck --test-notification
   server-security-healthcheck --list-checks
   server-security-healthcheck --help
@@ -162,6 +186,7 @@ for check_name in "${HC_REG_NAMES[@]}"; do
     [ "${HC_REG_KIND[$check_name]}" != helper ] || continue
     [ "${HC_REQUIRED[$check_name]:-0}" = 1 ] || continue
     [ "${HC_LOADED[$check_name]:-0}" = 1 ] || continue
+    [ "${HC_JSON_FILE:-}" = "" ] || HC_JSON_CURRENT="$check_name"
     dependency="${HC_REG_DEP[$check_name]}"
     if [ "$dependency" != - ] && [ "${HC_LOADED[$dependency]:-0}" != 1 ]; then
         hc_status ERROR "Required check dependency unavailable: $check_name/$dependency"
@@ -185,6 +210,10 @@ for check_name in "${HC_REG_NAMES[@]}"; do
         hc_status ERROR "Cannot restore effective enable state: $check_name"
         continue
     }
+    if [ "${HC_JSON_FILE:-}" != "" ]; then
+        hc_json_clock start "$check_name"
+        json_na_before=$HC_NOT_APPLICABLE
+    fi
     HC_EXECUTED[$check_name]=1
     execution_failed=0
     set -E
@@ -193,15 +222,21 @@ for check_name in "${HC_REG_NAMES[@]}"; do
     execution_status=$?
     trap - ERR
     set +E
+    if [ "${HC_JSON_FILE:-}" != "" ]; then
+        hc_json_clock end "$check_name"
+        [ "$HC_NOT_APPLICABLE" = "$json_na_before" ] || hc_json_record state "$check_name" not_applicable ''
+    fi
     if [ "$execution_status" != 0 ] || [ "$execution_failed" != 0 ]; then
         hc_status ERROR "Check execution failed: $check_name"
     fi
 done
 for check_name in "${!HC_REQUIRED[@]}"; do
     [ "${HC_REG_KIND[$check_name]}" != helper ] || continue
+    [ "${HC_JSON_FILE:-}" = "" ] || HC_JSON_CURRENT="$check_name"
     [ "${HC_EXECUTED[$check_name]:-0}" = 1 ] || hc_status ERROR "Required check not executed: $check_name"
 done
 
+[ "${HC_JSON_FILE:-}" = "" ] || { HC_JSON_CURRENT=''; hc_output_runtime_guard; }
 # Checks may load extension code; recheck provenance before using the backend.
 if [ "$HC_NOTIFY_READY" = 1 ] &&
    { ! hc_function_from notify_telegram "${NOTIFY_DIR}/telegram.sh" || ! hc_function_from notify_test "${NOTIFY_DIR}/telegram.sh"; }; then
@@ -209,23 +244,33 @@ if [ "$HC_NOTIFY_READY" = 1 ] &&
     HC_NOTIFY_READY=0
 fi
 
+[ "${HC_JSON_FILE:-}" = "" ] || HC_JSON_COMPLETED=1
 executed_count=0
 for check_name in "${!HC_EXECUTED[@]}"; do executed_count=$((executed_count + 1)); done
 hc_log "Checks: executed=$executed_count disabled=$HC_DISABLED not_applicable=$HC_NOT_APPLICABLE discovery_failed=$HC_DISCOVERY_FAILED"
+[ "$HC_RESULTS_TRUNCATED" = 0 ] || hc_log 'Presentation truncated; severity counters remain complete'
 
-if [ "${#HC_WARNINGS[@]}" -eq 0 ] && [ "$HC_ERRORS" -eq 0 ]; then
+if [ "$((HC_WARNING_COUNT + HC_CRITICAL_COUNT))" -eq 0 ] && [ "$HC_ERRORS" -eq 0 ]; then
     hc_log "OK all enabled checks passed"
     exit 0
 fi
 
-host="$(hc_present "$(hostname -f 2>/dev/null || hostname)")"
+host="$(hostname -f 2>/dev/null || hostname)"
+hc_redact "$host"
+hc_presentation_prefix "$HC_PRESENT_VALUE" 255
+[ "$HC_PRESENT_TRUNCATED" = 0 ] || HC_RESULTS_TRUNCATED=1
+host="$(hc_present "$HC_PRESENT_VALUE")"
 message="⚠️ Security healthcheck — ${host}
 $(date '+%Y-%m-%d %H:%M:%S %Z')
 
-Problems found: ${#HC_WARNINGS[@]}
+Problems found: $((HC_WARNING_COUNT + HC_CRITICAL_COUNT))
 Execution errors: ${HC_ERRORS}
 
 "
+
+if [ "$HC_RESULTS_TRUNCATED" = 1 ]; then
+    hc_summary_append "Presentation truncated; critical=$HC_CRITICAL_COUNT errors=$HC_ERRORS; counters remain complete."$'\n'
+fi
 
 i=1
 # Prioritize critical findings, then execution errors, then policy warnings so
@@ -233,20 +278,25 @@ i=1
 for severity in CRITICAL ERROR WARNING; do
     for item in "${HC_WARNINGS[@]}" "${HC_ERROR_MESSAGES[@]}"; do
         [[ "$item" = "$severity "* ]] || continue
-        message+="${i}. ${item}"$'\n'
+        hc_summary_append "${i}. ${item}"$'\n'
         i=$((i + 1))
     done
 done
 
 if [ "${#HC_DETAILS[@]}" -gt 0 ]; then
-    message+=$'\n'"Context:"$'\n'
+    hc_summary_append $'\n'"Context:"$'\n'
     for item in "${HC_DETAILS[@]}"; do
-        message+="• ${item}"$'\n'
+        hc_summary_append "• ${item}"$'\n'
     done
+fi
+
+if [ "$HC_RESULTS_TRUNCATED" = 1 ]; then
+    message+=$'\n'"Presentation truncated; critical=$HC_CRITICAL_COUNT errors=$HC_ERRORS; counters remain complete."$'\n'
 fi
 
 if [ "$HC_NOTIFY_READY" = 1 ] && hc_function_from notify_telegram "${NOTIFY_DIR}/telegram.sh"; then
     notify_telegram "$message" || {
+        [ "${HC_JSON_FILE:-}" = "" ] || hc_status ERROR 'Notification execution failed'
         printf '%s\n' "$message" >&2
         exit 2
     }
