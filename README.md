@@ -1,6 +1,6 @@
 # Server Security Healthcheck
 
-Current release candidate: **v1.1.2** (not yet tagged or published); v1.1.1 is tagged.
+Current stable release: **v1.1.2** (tagged).
 The first stable public contract baseline is v1.0.0.
 Earlier 0.x versions were internal development milestones.
 
@@ -598,15 +598,15 @@ the server's system Python 3.6.8 remains unchanged.
 
 ```bash
 python3.12 -m unittest discover -s tests -v
-git diff --check
-for script in bin/server-security-healthcheck install.sh uninstall.sh install-dependencies.sh \
-  lib/common.sh lib/checks/*.sh lib/notify/*.sh; do
-  bash -n "$script" || exit
-done
+python3.12 .github/ci/check.py static
 # Optional, only if already available:
 shellcheck -S style bin/server-security-healthcheck lib/common.sh lib/checks/*.sh \
   lib/notify/*.sh install.sh uninstall.sh install-dependencies.sh
 ```
+
+GitHub Actions runs static/version checks, this full suite and digest-pinned
+Python 3.6.8 / Bash 4.4 compatibility checks on pushes and pull requests to `main`.
+See [CI and local reproduction](docs/CI.md) for commands, isolation and limitations.
 
 The fixture suite uses a fixed clock and mocked service/process/network commands;
 it does not run a scan or contact Telegram. Installation tests use a temporary

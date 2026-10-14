@@ -1,6 +1,14 @@
 # Changelog
 
-## [1.1.2] - Unreleased
+## Unreleased
+
+### Internal
+
+- Add read-only GitHub Actions CI for static/version validation, the full
+  regression suite and pinned Bash 4.4 / Python 3.6.8 runtime compatibility.
+  No runtime behavior or public version change.
+
+## [1.1.2] - 2026-10-13
 
 Backward-compatible internal performance improvements on v1.1.1.
 

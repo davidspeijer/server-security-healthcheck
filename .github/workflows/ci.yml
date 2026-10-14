@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TZ: UTC
+  LC_ALL: C.UTF-8
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Committed diff, shell syntax and version consistency
+        run: python3 .github/ci/check.py static
+
+  tests-python312:
+    name: Full regression suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Full regression suite including security contracts
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          export TMPDIR="$GITHUB_WORKSPACE/tmp"
+          python --version
+          bash --version
+          python -m unittest discover -s tests -v
+
+  runtime-compatibility:
+    name: Runtime compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Discover repository shell files
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          python3 .github/ci/check.py shell-list > tmp/ci-shell-files
+      # Docker Official Images, pinned linux/amd64 manifests. Actions run on
+      # the modern host; obsolete compatibility containers never run Node.
+      - name: Python 3.6.8 compile, import and JSON self-test
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --workdir /work --env PYTHONDONTWRITEBYTECODE=1 --env TZ=UTC \
+            python:3.6.8-slim-stretch@sha256:342a794da4cb1fd4ecd4b7636544697970daf850a131d8adc334c8719d8ecf44 \
+            python3 .github/ci/check.py runtime
+      - name: Bash 4.4 syntax and behavior contracts
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --workdir /work --env LC_ALL=C --env TZ=UTC \
+            bash:4.4.23@sha256:71f0399fbec8c6244521ecef72882f55bc2a73dde5f03374d880f659a3db85cb \
+            bash .github/ci/bash44.sh tmp/ci-shell-files
